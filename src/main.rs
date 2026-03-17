@@ -37,7 +37,7 @@ fn fmt_tokens(n: u64) -> String {
     let mut out = String::new();
     let len = bytes.len();
     for (i, &b) in bytes.iter().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
+        if i > 0 && (len - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(b as char);
@@ -203,7 +203,13 @@ async fn run_github_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
     let is_emerging = mode.contains("新興");
     let mode_key = if is_emerging { "emerging" } else { "hot" };
 
-    let cache_key = ["github", kw, mode_key, &cfg.model, &cfg.max_results.to_string()];
+    let cache_key = [
+        "github",
+        kw,
+        mode_key,
+        &cfg.model,
+        &cfg.max_results.to_string(),
+    ];
     if let Some((cached, ttl)) = cache::get(&cache_key) {
         show_cached(&cached, ttl);
         return Ok(());
@@ -406,7 +412,9 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
 // ── Competitive analysis: render competitor table ──────────────────────────────
 
 fn render_competitor_table(rows: &[CompetitorRow], target_name: &str) {
-    use comfy_table::{presets::UTF8_FULL, Attribute, Cell, CellAlignment, ContentArrangement, Table};
+    use comfy_table::{
+        presets::UTF8_FULL, Attribute, Cell, CellAlignment, ContentArrangement, Table,
+    };
 
     if rows.is_empty() {
         return;
@@ -453,29 +461,29 @@ fn render_competitor_table(rows: &[CompetitorRow], target_name: &str) {
 
 fn sc_bold(s: &str, color: &str) -> String {
     match color {
-        "green"  => style(s).green().bold().to_string(),
-        "red"    => style(s).red().bold().to_string(),
-        "cyan"   => style(s).cyan().bold().to_string(),
+        "green" => style(s).green().bold().to_string(),
+        "red" => style(s).red().bold().to_string(),
+        "cyan" => style(s).cyan().bold().to_string(),
         "yellow" => style(s).yellow().bold().to_string(),
-        _        => style(s).bold().to_string(),
+        _ => style(s).bold().to_string(),
     }
 }
 
 fn sc_dim(s: &str, color: &str) -> String {
     match color {
-        "green"  => style(s).green().dim().to_string(),
-        "red"    => style(s).red().dim().to_string(),
-        "cyan"   => style(s).cyan().dim().to_string(),
+        "green" => style(s).green().dim().to_string(),
+        "red" => style(s).red().dim().to_string(),
+        "cyan" => style(s).cyan().dim().to_string(),
         "yellow" => style(s).yellow().dim().to_string(),
-        _        => style(s).dim().to_string(),
+        _ => style(s).dim().to_string(),
     }
 }
 
 fn render_analysis_sections(text: &str) {
     const CONFIGS: &[(u32, &str, &str)] = &[
-        (2, "green",  "核心競爭優勢"),
-        (3, "red",    "主要劣勢與風險"),
-        (4, "cyan",   "選型建議"),
+        (2, "green", "核心競爭優勢"),
+        (3, "red", "主要劣勢與風險"),
+        (4, "cyan", "選型建議"),
         (5, "yellow", "總結"),
     ];
 
@@ -558,7 +566,11 @@ fn render_analysis_sections(text: &str) {
                     // → key phrase in bold colour, description in normal
                     if let Some((key, desc)) = content.split_once('：') {
                         println!("  {}", sc_bold(&format!("{} {}：", b, key.trim()), color));
-                        let pad = if b.trim_start() == "›" { "      " } else { "    " };
+                        let pad = if b.trim_start() == "›" {
+                            "      "
+                        } else {
+                            "    "
+                        };
                         println!("  {}{}", pad, desc.trim());
                     } else {
                         // No colon — bullet marker in colour, rest normal
@@ -602,11 +614,14 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
     // Use REVIEW_MODEL env var if set, otherwise default to gpt-5.4-2026-03-05.
     // If the model is unavailable, review_and_augment() treats the failure as satisfied
     // and skips the round gracefully.
-    let review_model = std::env::var("REVIEW_MODEL")
-        .unwrap_or_else(|_| "gpt-5.4-2026-03-05".to_string());
+    let review_model =
+        std::env::var("REVIEW_MODEL").unwrap_or_else(|_| "gpt-5.4-2026-03-05".to_string());
     let review_llm = LLMClient::new(&review_model)?;
     for round in 1..=2u8 {
-        let spinner = Spinner::new(&format!("進階模型審核雷達圖（第 {}/2 輪，{}）...", round, review_model));
+        let spinner = Spinner::new(&format!(
+            "進階模型審核雷達圖（第 {}/2 輪，{}）...",
+            round, review_model
+        ));
         let satisfied = review_and_augment(&mut blips, &q_names, kw, &review_llm).await;
         if satisfied {
             spinner.finish(&format!(

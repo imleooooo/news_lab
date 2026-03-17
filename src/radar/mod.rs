@@ -3,8 +3,8 @@ pub mod terminal;
 use crate::fetcher::NewsItem;
 use crate::llm::LLMClient;
 use anyhow::Result;
-use log::{debug, info, warn};
 use chrono::Utc;
+use log::{debug, info, warn};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -307,7 +307,10 @@ fn urlencoding(s: &str) -> String {
             _ => {
                 let mut buf = [0u8; 4];
                 let len = c.encode_utf8(&mut buf).len();
-                buf[..len].iter().map(|b| format!("%{:02X}", b)).collect::<String>()
+                buf[..len]
+                    .iter()
+                    .map(|b| format!("%{:02X}", b))
+                    .collect::<String>()
             }
         })
         .collect()

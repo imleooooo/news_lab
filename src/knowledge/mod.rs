@@ -3,8 +3,8 @@ pub mod terminal;
 use crate::fetcher::NewsItem;
 use crate::llm::LLMClient;
 use anyhow::Result;
-use log::{debug, warn};
 use chrono::Utc;
+use log::{debug, warn};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 

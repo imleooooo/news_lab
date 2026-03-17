@@ -14,8 +14,8 @@ mod enc {
 
 fn decode(data: &[u8]) -> String {
     const KEY: &[u8] = &[
-        0x4e, 0x6c, 0x39, 0x21, 0x7f, 0x2a, 0x5c, 0x11,
-        0x88, 0x45, 0xc3, 0x7b, 0x2d, 0x91, 0xf4, 0x63,
+        0x4e, 0x6c, 0x39, 0x21, 0x7f, 0x2a, 0x5c, 0x11, 0x88, 0x45, 0xc3, 0x7b, 0x2d, 0x91, 0xf4,
+        0x63,
     ];
     let bytes: Vec<u8> = data
         .iter()
@@ -222,8 +222,10 @@ pub async fn analyze_competition(
         .replace("{radar_items}", &radar_items);
 
     // Two parallel LLM calls
-    let (json_result, text_result) =
-        tokio::join!(llm.invoke(&prompt_json), llm.invoke_with_limit(&prompt_text, 4096));
+    let (json_result, text_result) = tokio::join!(
+        llm.invoke(&prompt_json),
+        llm.invoke_with_limit(&prompt_text, 4096)
+    );
 
     // Parse competitors JSON
     let competitors = match json_result {
@@ -231,8 +233,7 @@ pub async fn analyze_competition(
             let s = strip_code_fence(raw);
             match (s.find('['), s.rfind(']')) {
                 (Some(start), Some(end)) => {
-                    serde_json::from_str::<Vec<CompetitorRow>>(&s[start..=end])
-                        .unwrap_or_default()
+                    serde_json::from_str::<Vec<CompetitorRow>>(&s[start..=end]).unwrap_or_default()
                 }
                 _ => vec![],
             }

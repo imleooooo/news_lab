@@ -347,7 +347,10 @@ fn urlencoding(s: &str) -> String {
                 // Encode each UTF-8 byte separately (e.g. '機' → %E6%A9%9F)
                 let mut buf = [0u8; 4];
                 let len = c.encode_utf8(&mut buf).len();
-                buf[..len].iter().map(|b| format!("%{:02X}", b)).collect::<String>()
+                buf[..len]
+                    .iter()
+                    .map(|b| format!("%{:02X}", b))
+                    .collect::<String>()
             }
         })
         .collect()
@@ -592,8 +595,16 @@ async fn fetch_rss_feed(url: &str, source: &str, keywords: &[String], max: usize
 const RSS_SOURCES: &[(&str, &str, bool)] = &[
     // ── English ────────────────────────────────────────────────────────────────
     ("https://feed.infoq.com/", "InfoQ", false),
-    ("https://www.theregister.com/headlines.atom", "The Register", false),
-    ("https://feeds.arstechnica.com/arstechnica/technology-lab", "Ars Technica", false),
+    (
+        "https://www.theregister.com/headlines.atom",
+        "The Register",
+        false,
+    ),
+    (
+        "https://feeds.arstechnica.com/arstechnica/technology-lab",
+        "Ars Technica",
+        false,
+    ),
     ("https://techcrunch.com/feed/", "TechCrunch", false),
     ("https://thenewstack.io/feed/", "The New Stack", false),
     ("https://lobste.rs/rss", "Lobsters", false),

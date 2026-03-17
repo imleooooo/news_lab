@@ -177,7 +177,10 @@ fn urlencoding(s: &str) -> String {
             _ => {
                 let mut buf = [0u8; 4];
                 let len = c.encode_utf8(&mut buf).len();
-                buf[..len].iter().map(|b| format!("%{:02X}", b)).collect::<String>()
+                buf[..len]
+                    .iter()
+                    .map(|b| format!("%{:02X}", b))
+                    .collect::<String>()
             }
         })
         .collect()

@@ -1,5 +1,4 @@
 use anyhow::Result;
-use log::warn;
 use async_openai::{
     config::OpenAIConfig,
     types::{
@@ -8,6 +7,7 @@ use async_openai::{
     },
     Client,
 };
+use log::warn;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -114,8 +114,7 @@ impl LLMClient {
                 Some(text) if !text.trim().is_empty() => return Ok(text),
                 _ => {
                     warn!("[llm] content 為空，finish_reason={:?}", reason);
-                    last_err =
-                        anyhow::anyhow!("LLM 回傳空內容（finish_reason={:?}）", reason);
+                    last_err = anyhow::anyhow!("LLM 回傳空內容（finish_reason={:?}）", reason);
                     continue;
                 }
             }
