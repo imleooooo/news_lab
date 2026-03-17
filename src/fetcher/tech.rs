@@ -54,33 +54,32 @@ pub async fn fetch_hackernews(kw: &str, max: usize) -> Vec<NewsItem> {
     ];
 
     for url in &urls {
-        if let Ok(resp) = client.get(url).send().await {
-            if let Ok(data) = resp.json::<HNResponse>().await {
-                let items: Vec<NewsItem> = data
-                    .hits
-                    .into_iter()
-                    .filter(|h| !h.title.is_empty())
-                    .map(|h| {
-                        let published = DateTime::parse_from_rfc3339(&h.created_at)
-                            .ok()
-                            .map(|d| d.with_timezone(&Utc));
-                        NewsItem {
-                            title: h.title.clone(),
-                            url: if h.url.is_empty() {
-                                format!("https://news.ycombinator.com/item?id={}", h.object_id)
-                            } else {
-                                h.url.clone()
-                            },
-                            source: "Hacker News".to_string(),
-                            published,
-                            description: h.story_text.chars().take(300).collect(),
-                        }
-                    })
-                    .collect();
-                if !items.is_empty() {
-                    return items;
+        let Some(data) = retry_get_json::<HNResponse>(&client, url).await else {
+            continue;
+        };
+        let items: Vec<NewsItem> = data
+            .hits
+            .into_iter()
+            .filter(|h| !h.title.is_empty())
+            .map(|h| {
+                let published = DateTime::parse_from_rfc3339(&h.created_at)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc));
+                NewsItem {
+                    title: h.title.clone(),
+                    url: if h.url.is_empty() {
+                        format!("https://news.ycombinator.com/item?id={}", h.object_id)
+                    } else {
+                        h.url.clone()
+                    },
+                    source: "Hacker News".to_string(),
+                    published,
+                    description: h.story_text.chars().take(300).collect(),
                 }
-            }
+            })
+            .collect();
+        if !items.is_empty() {
+            return items;
         }
     }
     vec![]
@@ -348,6 +347,59 @@ fn urlencoding(s: &str) -> String {
         .collect()
 }
 
+// ── Retry helpers ───────────────────────────────────────────────────────────────
+
+/// GET + deserialize JSON with up to 3 attempts (1 s / 2 s exponential backoff).
+/// Returns None on persistent failure or 4xx response.
+async fn retry_get_json<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+) -> Option<T> {
+    for attempt in 0..3u32 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(1u64 << (attempt - 1))).await;
+        }
+        let resp = match client.get(url).send().await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if resp.status().is_client_error() {
+            return None; // 4xx → don't retry
+        }
+        if resp.status().is_server_error() {
+            continue; // 5xx → retry
+        }
+        if let Ok(data) = resp.json::<T>().await {
+            return Some(data);
+        }
+    }
+    None
+}
+
+/// GET text (RSS / Atom XML) with up to 3 attempts (1 s / 2 s exponential backoff).
+/// Returns None on persistent failure or 4xx response.
+async fn retry_get_text(client: &reqwest::Client, url: &str) -> Option<String> {
+    for attempt in 0..3u32 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(1u64 << (attempt - 1))).await;
+        }
+        let resp = match client.get(url).send().await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if resp.status().is_client_error() {
+            return None;
+        }
+        if resp.status().is_server_error() {
+            continue;
+        }
+        if let Ok(text) = resp.text().await {
+            return Some(text);
+        }
+    }
+    None
+}
+
 // ── RSS Feed Parser ─────────────────────────────────────────────────────────────
 
 fn strip_html(s: &str) -> String {
@@ -515,15 +567,12 @@ fn parse_rss_items(xml: &str, source: &str, keywords: &[String], max: usize) -> 
 
 async fn fetch_rss_feed(url: &str, source: &str, keywords: &[String], max: usize) -> Vec<NewsItem> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(6))
         .user_agent("news_lab/0.1")
         .build()
         .unwrap_or_default();
 
-    let Ok(resp) = client.get(url).send().await else {
-        return vec![];
-    };
-    let Ok(body) = resp.text().await else {
+    let Some(body) = retry_get_text(&client, url).await else {
         return vec![];
     };
     parse_rss_items(&body, source, keywords, max)
@@ -548,14 +597,26 @@ const RSS_SOURCES: &[(&str, &str, bool)] = &[
 ];
 
 /// Fetch all RSS sources in parallel using language-appropriate keywords.
-/// `en_kw` is used for English sources; `zh_kw` for Traditional Chinese sources.
+/// Each source has an independent 8-second timeout; a slow/failed source does not
+/// affect the others.
+/// Requests are staggered by 1 second each (index × 1 s) to avoid bursting all
+/// sources simultaneously and reduce load on remote servers.
 pub async fn fetch_all_rss(en_kw: &[String], zh_kw: &[String], max: usize) -> Vec<NewsItem> {
     let per_source = ((max / RSS_SOURCES.len()) + 2).min(max);
     let futures: Vec<_> = RSS_SOURCES
         .iter()
-        .map(|(url, source, is_zh)| {
-            let kw = if *is_zh { zh_kw } else { en_kw };
-            fetch_rss_feed(url, source, kw, per_source)
+        .enumerate()
+        .map(|(i, (url, source, is_zh))| {
+            let kw: &[String] = if *is_zh { zh_kw } else { en_kw };
+            async move {
+                tokio::time::sleep(std::time::Duration::from_secs(i as u64)).await;
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(8),
+                    fetch_rss_feed(url, source, kw, per_source),
+                )
+                .await
+                .unwrap_or_default()
+            }
         })
         .collect();
 

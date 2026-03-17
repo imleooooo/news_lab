@@ -28,6 +28,43 @@ use summarizer::{
 };
 use ui::{panel, print_url, separator, Spinner};
 
+// ── Cost display helpers ────────────────────────────────────────────────────────
+
+fn fmt_tokens(n: u64) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::new();
+    let len = bytes.len();
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(b as char);
+    }
+    out
+}
+
+fn print_usage(llm: &LLMClient) {
+    let (p, c, cost) = llm.usage();
+    if p + c == 0 {
+        return;
+    }
+    let is_estimate = llm.model.contains("gpt-5") || llm.model.contains("o1");
+    let cost_str = if is_estimate {
+        format!("≈ ${:.4} (估算)", cost)
+    } else {
+        format!("≈ ${:.4}", cost)
+    };
+    println!(
+        "  {} {}  {} + {} tokens  {}",
+        style("用量").dim(),
+        style(&llm.model).dim(),
+        style(fmt_tokens(p)).dim(),
+        style(fmt_tokens(c)).dim(),
+        style(cost_str).yellow(),
+    );
+}
+
 // ── Banner ─────────────────────────────────────────────────────────────────────
 
 fn print_banner() {
@@ -481,9 +518,14 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
     }
 
     // Review loop: advanced model audits and augments, up to 2 rounds
-    let review_llm = LLMClient::new("gpt-5.4-2026-03-05")?;
+    // Use REVIEW_MODEL env var if set, otherwise default to gpt-5.4-2026-03-05.
+    // If the model is unavailable, review_and_augment() treats the failure as satisfied
+    // and skips the round gracefully.
+    let review_model = std::env::var("REVIEW_MODEL")
+        .unwrap_or_else(|_| "gpt-5.4-2026-03-05".to_string());
+    let review_llm = LLMClient::new(&review_model)?;
     for round in 1..=2u8 {
-        let spinner = Spinner::new(&format!("進階模型審核雷達圖（第 {}/2 輪）...", round));
+        let spinner = Spinner::new(&format!("進階模型審核雷達圖（第 {}/2 輪，{}）...", round, review_model));
         let satisfied = review_and_augment(&mut blips, &q_names, kw, &review_llm).await;
         if satisfied {
             spinner.finish(&format!(
@@ -499,6 +541,8 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
             blips.len()
         ));
     }
+
+    print_usage(&review_llm);
 
     // GitHub activity check for open-source blips
     let spinner = Spinner::new("檢查開源專案 GitHub 活躍度...");
@@ -795,6 +839,7 @@ async fn main() -> Result<()> {
 
             separator();
 
+            llm.reset_usage();
             let result = match feature.as_str() {
                 f if f.contains("新聞摘要") => run_news_summary(&keyword, &cfg, &llm).await,
                 f if f.contains("開源專案") => run_github_summary(&keyword, &cfg, &llm).await,
@@ -838,6 +883,7 @@ async fn main() -> Result<()> {
                 eprintln!("  {} 錯誤: {}", style("✗").red(), e);
             }
 
+            print_usage(&llm);
             separator();
         }
     }

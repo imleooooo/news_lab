@@ -70,6 +70,9 @@ OPENAI_API_KEY=sk-...
 
 # 選用（提高 GitHub API 速率上限，CNCF 功能建議設定）
 GITHUB_TOKEN=ghp_...
+
+# 選用（技術雷達「進階審核」使用的模型，預設 gpt-5.4-2026-03-05）
+REVIEW_MODEL=gpt-4o
 ```
 
 `.pkg` 安裝版會自動將 `.env` 打包至 App bundle，無需額外設定。
