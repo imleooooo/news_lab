@@ -132,6 +132,41 @@ fn extract_json(response: &str) -> &str {
     response
 }
 
+/// Escape literal newlines / carriage returns inside JSON string values.
+/// LLMs occasionally emit real line-breaks in strings instead of `\n` / `\r`,
+/// which causes serde_json to fail with "expected `,` or `]`".
+fn sanitize_json_strings(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 32);
+    let mut in_string = false;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if !in_string {
+            out.push(c);
+            if c == '"' {
+                in_string = true;
+            }
+        } else {
+            match c {
+                // Consume the full escape sequence unchanged (e.g. \", \\, \n)
+                '\\' => {
+                    out.push('\\');
+                    if let Some(next) = chars.next() {
+                        out.push(next);
+                    }
+                }
+                '"' => {
+                    out.push('"');
+                    in_string = false;
+                }
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                _ => out.push(c),
+            }
+        }
+    }
+    out
+}
+
 // ── Deduplication (mirrors Python _deduplicate) ────────────────────────────────
 
 fn key(name: &str) -> String {
@@ -359,9 +394,9 @@ pub async fn extract_blips(
 
     // Radar JSON can be large (15-40 blips); use higher token limit
     let response = llm.invoke_with_limit(&prompt, 16384).await?;
-    let json_str = extract_json(&response);
+    let json_str = sanitize_json_strings(extract_json(&response));
 
-    let parsed: RadarResponse = match serde_json::from_str(json_str) {
+    let parsed: RadarResponse = match serde_json::from_str(&json_str) {
         Ok(r) => r,
         Err(e) => {
             warn!("[radar] JSON 解析失敗: {e}");
@@ -505,8 +540,8 @@ pub async fn review_and_augment(
         }
     };
 
-    let json_str = extract_json(&response);
-    let parsed: ReviewResponse = match serde_json::from_str(json_str) {
+    let json_str = sanitize_json_strings(extract_json(&response));
+    let parsed: ReviewResponse = match serde_json::from_str(&json_str) {
         Ok(r) => r,
         Err(e) => {
             warn!("[review] JSON 解析失敗: {e}");
