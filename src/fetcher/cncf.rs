@@ -174,7 +174,11 @@ fn urlencoding(s: &str) -> String {
         .map(|c| match c {
             'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
             ' ' => "+".to_string(),
-            _ => format!("%{:02X}", c as u32),
+            _ => {
+                let mut buf = [0u8; 4];
+                let len = c.encode_utf8(&mut buf).len();
+                buf[..len].iter().map(|b| format!("%{:02X}", b)).collect::<String>()
+            }
         })
         .collect()
 }

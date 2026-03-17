@@ -1,4 +1,5 @@
 use anyhow::Result;
+use log::warn;
 use async_openai::{
     config::OpenAIConfig,
     types::{
@@ -51,7 +52,7 @@ impl LLMClient {
         for attempt in 0..3u32 {
             if attempt > 0 {
                 let wait = 1u64 << (attempt - 1); // 1 s, 2 s
-                eprintln!("  [llm] 第 {}/{} 次重試，等待 {}s...", attempt + 1, 3, wait);
+                warn!("[llm] 第 {}/{} 次重試，等待 {}s...", attempt + 1, 3, wait);
                 tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
             }
 
@@ -105,14 +106,14 @@ impl LLMClient {
             let reason = choice.finish_reason.as_ref().map(|r| format!("{:?}", r));
             if let Some(ref r) = reason {
                 if r != "\"Stop\"" && r != "Stop" {
-                    eprintln!("  [llm] finish_reason: {r}");
+                    warn!("[llm] finish_reason: {r}");
                 }
             }
 
             match choice.message.content {
                 Some(text) if !text.trim().is_empty() => return Ok(text),
                 _ => {
-                    eprintln!("  [llm] content 為空，finish_reason={:?}", reason);
+                    warn!("[llm] content 為空，finish_reason={:?}", reason);
                     last_err =
                         anyhow::anyhow!("LLM 回傳空內容（finish_reason={:?}）", reason);
                     continue;

@@ -6,6 +6,7 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use regex::Regex;
 use serde::Deserialize;
+use std::sync::OnceLock;
 
 // ── Hacker News ────────────────────────────────────────────────────────────────
 
@@ -342,7 +343,12 @@ fn urlencoding(s: &str) -> String {
         .map(|c| match c {
             'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
             ' ' => "+".to_string(),
-            _ => format!("%{:02X}", c as u32),
+            _ => {
+                // Encode each UTF-8 byte separately (e.g. '機' → %E6%A9%9F)
+                let mut buf = [0u8; 4];
+                let len = c.encode_utf8(&mut buf).len();
+                buf[..len].iter().map(|b| format!("%{:02X}", b)).collect::<String>()
+            }
         })
         .collect()
 }
@@ -403,8 +409,10 @@ async fn retry_get_text(client: &reqwest::Client, url: &str) -> Option<String> {
 // ── RSS Feed Parser ─────────────────────────────────────────────────────────────
 
 fn strip_html(s: &str) -> String {
-    let tag_re = Regex::new(r"<[^>]+>").unwrap();
-    let ws_re = Regex::new(r"\s+").unwrap();
+    static TAG_RE: OnceLock<Regex> = OnceLock::new();
+    static WS_RE: OnceLock<Regex> = OnceLock::new();
+    let tag_re = TAG_RE.get_or_init(|| Regex::new(r"<[^>]+>").unwrap());
+    let ws_re = WS_RE.get_or_init(|| Regex::new(r"\s+").unwrap());
     let stripped = tag_re.replace_all(s, " ");
     ws_re.replace_all(stripped.trim(), " ").into_owned()
 }

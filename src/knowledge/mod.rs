@@ -3,6 +3,7 @@ pub mod terminal;
 use crate::fetcher::NewsItem;
 use crate::llm::LLMClient;
 use anyhow::Result;
+use log::{debug, warn};
 use chrono::Utc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -140,8 +141,8 @@ pub async fn extract_knowledge_graph(
             Ok(kg)
         }
         Err(e) => {
-            eprintln!("  [kg] JSON 解析失敗: {e}");
-            eprintln!("  [kg] LLM 原始回應:\n{response}");
+            warn!("[kg] JSON 解析失敗: {e}");
+            debug!("[kg] LLM 原始回應:\n{response}");
             Ok(KnowledgeGraph {
                 center: kw.to_string(),
                 clusters: vec![],

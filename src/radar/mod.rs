@@ -3,6 +3,7 @@ pub mod terminal;
 use crate::fetcher::NewsItem;
 use crate::llm::LLMClient;
 use anyhow::Result;
+use log::{debug, info, warn};
 use chrono::Utc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -303,7 +304,11 @@ fn urlencoding(s: &str) -> String {
         .map(|c| match c {
             'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
             ' ' => "+".to_string(),
-            _ => format!("%{:02X}", c as u32),
+            _ => {
+                let mut buf = [0u8; 4];
+                let len = c.encode_utf8(&mut buf).len();
+                buf[..len].iter().map(|b| format!("%{:02X}", b)).collect::<String>()
+            }
         })
         .collect()
 }
@@ -356,8 +361,8 @@ pub async fn extract_blips(
     let parsed: RadarResponse = match serde_json::from_str(json_str) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("  [radar] JSON 解析失敗: {e}");
-            eprintln!("  [radar] LLM 原始回應:\n{response}");
+            warn!("[radar] JSON 解析失敗: {e}");
+            debug!("[radar] LLM 原始回應:\n{response}");
             return Ok((default_quadrant_names(), vec![]));
         }
     };
@@ -492,7 +497,7 @@ pub async fn review_and_augment(
     let response = match review_llm.invoke_with_limit(&prompt, 8192).await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("  [review] LLM 呼叫失敗: {e}");
+            warn!("[review] LLM 呼叫失敗: {e}");
             return true; // treat as satisfied on error
         }
     };
@@ -501,7 +506,7 @@ pub async fn review_and_augment(
     let parsed: ReviewResponse = match serde_json::from_str(json_str) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("  [review] JSON 解析失敗: {e}");
+            warn!("[review] JSON 解析失敗: {e}");
             return true;
         }
     };
@@ -510,7 +515,7 @@ pub async fn review_and_augment(
         return true;
     }
 
-    eprintln!("  [review] 補充原因: {}", parsed.reason);
+    info!("[review] 補充原因: {}", parsed.reason);
 
     // Normalize and merge new blips
     let new_blips: Vec<Blip> = parsed

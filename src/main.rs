@@ -1,3 +1,4 @@
+mod cache;
 mod config;
 mod fetcher;
 mod knowledge;
@@ -65,6 +66,25 @@ fn print_usage(llm: &LLMClient) {
     );
 }
 
+// ── Cache helpers ──────────────────────────────────────────────────────────────
+
+/// Display cached items and print a TTL hint. Returns true so callers can early-return.
+fn show_cached(items: &[cache::DisplayItem], ttl_secs: u64) -> bool {
+    let mins = ttl_secs / 60;
+    println!(
+        "  {} 快取命中（還有 {} 分鐘到期）",
+        style("⚡").yellow().bold(),
+        mins,
+    );
+    separator();
+    for item in items {
+        panel(&item.title, &item.content, &item.color);
+        print_url(&item.url);
+        separator();
+    }
+    true
+}
+
 // ── Banner ─────────────────────────────────────────────────────────────────────
 
 fn print_banner() {
@@ -85,6 +105,12 @@ fn print_banner() {
 
 async fn run_news_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()> {
     let max = cfg.max_results;
+
+    let cache_key = ["news", kw, &cfg.model, &max.to_string()];
+    if let Some((cached, ttl)) = cache::get(&cache_key) {
+        show_cached(&cached, ttl);
+        return Ok(());
+    }
 
     // Step 1: expand keyword into English + Chinese term lists via LLM
     let expand_spinner = Spinner::new("正在展開搜尋關鍵字...");
@@ -128,6 +154,7 @@ async fn run_news_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()>
         return Ok(());
     }
 
+    let mut to_cache: Vec<cache::DisplayItem> = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let spinner = Spinner::new(&format!("摘要第 {}/{} 篇...", i + 1, items.len()));
         let summary = summarize_one(item, kw, llm).await;
@@ -142,12 +169,20 @@ async fn run_news_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()>
         let color = match item.source.as_str() {
             "InfoQ" => "blue",
             "iThome" => "magenta",
-            _ => "cyan", // Hacker News
+            _ => "cyan",
         };
-        panel(&format!("[{}] {}", i + 1, item.title), &content, color);
+        let title = format!("[{}] {}", i + 1, item.title);
+        panel(&title, &content, color);
         print_url(&item.url);
         separator();
+        to_cache.push(cache::DisplayItem {
+            title,
+            content,
+            url: item.url.clone(),
+            color: color.to_string(),
+        });
     }
+    cache::put(&cache_key, &to_cache);
 
     Ok(())
 }
@@ -166,6 +201,13 @@ async fn run_github_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
     .unwrap_or("近期熱門  — 近期有活動，按星數排序");
 
     let is_emerging = mode.contains("新興");
+    let mode_key = if is_emerging { "emerging" } else { "hot" };
+
+    let cache_key = ["github", kw, mode_key, &cfg.model, &cfg.max_results.to_string()];
+    if let Some((cached, ttl)) = cache::get(&cache_key) {
+        show_cached(&cached, ttl);
+        return Ok(());
+    }
 
     let (label_fetch, label_date) = if is_emerging {
         ("正在搜尋新興 GitHub 專案", "建立日期")
@@ -190,6 +232,7 @@ async fn run_github_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
         return Ok(());
     }
 
+    let mut to_cache: Vec<cache::DisplayItem> = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let spinner = Spinner::new(&format!("摘要第 {}/{} 個專案...", i + 1, items.len()));
         let summary = summarize_one(item, kw, llm).await;
@@ -201,10 +244,18 @@ async fn run_github_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
             .unwrap_or_else(|| "未知".to_string());
 
         let content = format!("來源: GitHub | {}: {}\n\n{}", label_date, date_str, summary);
-        panel(&format!("[{}] {}", i + 1, item.title), &content, "green");
+        let title = format!("[{}] {}", i + 1, item.title);
+        panel(&title, &content, "green");
         print_url(&item.url);
         separator();
+        to_cache.push(cache::DisplayItem {
+            title,
+            content,
+            url: item.url.clone(),
+            color: "green".to_string(),
+        });
     }
+    cache::put(&cache_key, &to_cache);
 
     Ok(())
 }
@@ -212,6 +263,12 @@ async fn run_github_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
 // ── Run: arXiv Paper Summary ───────────────────────────────────────────────────
 
 async fn run_paper_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()> {
+    let cache_key = ["arxiv", kw, &cfg.model, &cfg.max_results.to_string()];
+    if let Some((cached, ttl)) = cache::get(&cache_key) {
+        show_cached(&cached, ttl);
+        return Ok(());
+    }
+
     let spinner = Spinner::new(&format!("LLM 擴展搜尋關鍵字：{}", kw));
     let (papers, terms) = fetch_domain_papers(kw, cfg.max_results, 30, llm).await;
     spinner.finish(&format!(
@@ -225,6 +282,7 @@ async fn run_paper_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()
         return Ok(());
     }
 
+    let mut to_cache: Vec<cache::DisplayItem> = Vec::with_capacity(papers.len());
     for (i, paper) in papers.iter().enumerate() {
         let spinner = Spinner::new(&format!("摘要第 {}/{} 篇論文...", i + 1, papers.len()));
         let summary = summarize_arxiv(paper, kw, llm).await;
@@ -240,10 +298,18 @@ async fn run_paper_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()
             "arXiv ID: {} | 日期: {}\n作者: {}\n\n{}",
             paper.arxiv_id, pub_str, authors, summary
         );
-        panel(&format!("[{}] {}", i + 1, paper.title), &content, "magenta");
+        let title = format!("[{}] {}", i + 1, paper.title);
+        panel(&title, &content, "magenta");
         print_url(&paper.url);
         separator();
+        to_cache.push(cache::DisplayItem {
+            title,
+            content,
+            url: paper.url.clone(),
+            color: "magenta".to_string(),
+        });
     }
+    cache::put(&cache_key, &to_cache);
 
     Ok(())
 }
@@ -251,6 +317,12 @@ async fn run_paper_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()
 // ── Run: Podcast Summary ───────────────────────────────────────────────────────
 
 async fn run_podcast_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()> {
+    let cache_key = ["podcast", kw, &cfg.model, &cfg.max_results.to_string()];
+    if let Some((cached, ttl)) = cache::get(&cache_key) {
+        show_cached(&cached, ttl);
+        return Ok(());
+    }
+
     let max_pods = (cfg.max_results / 2).max(3);
     let max_eps = 3;
 
@@ -270,6 +342,7 @@ async fn run_podcast_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
     let ep_to_show = episodes.iter().take(cfg.max_results);
     let total = episodes.len().min(cfg.max_results);
 
+    let mut to_cache: Vec<cache::DisplayItem> = Vec::with_capacity(total);
     for (i, ep) in ep_to_show.enumerate() {
         let spinner = Spinner::new(&format!("摘要第 {}/{} 集...", i + 1, total));
         let summary = summarize_podcast(ep, kw, llm).await;
@@ -284,10 +357,18 @@ async fn run_podcast_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
             "播客: {} | 日期: {} | 時長: {}\n\n{}",
             ep.podcast_name, pub_str, ep.duration, summary
         );
-        panel(&format!("[{}] {}", i + 1, ep.title), &content, "blue");
+        let title = format!("[{}] {}", i + 1, ep.title);
+        panel(&title, &content, "blue");
         print_url(&ep.url);
         separator();
+        to_cache.push(cache::DisplayItem {
+            title,
+            content,
+            url: ep.url.clone(),
+            color: "blue".to_string(),
+        });
     }
+    cache::put(&cache_key, &to_cache);
 
     Ok(())
 }
@@ -768,11 +849,19 @@ async fn run_extras(cfg: &Config, llm: &LLMClient) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Try current dir, then parent dir (news-app/.env)
+    // Load .env first so RUST_LOG set inside it is visible to env_logger
     if dotenvy::dotenv().is_err() {
         let parent_env = std::path::Path::new("..").join(".env");
         dotenvy::from_path(parent_env).ok();
     }
+
+    // Logging: default warn; override with RUST_LOG=debug / RUST_LOG=info
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .format(|buf, record| {
+            use std::io::Write;
+            writeln!(buf, "  [{}] {}", record.level(), record.args())
+        })
+        .init();
 
     print_banner();
 

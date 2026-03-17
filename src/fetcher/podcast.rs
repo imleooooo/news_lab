@@ -1,7 +1,9 @@
 use chrono::{DateTime, Duration, Utc};
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use regex::Regex;
 use serde::Deserialize;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone)]
 pub struct PodcastEpisode {
@@ -218,7 +220,8 @@ fn update_episode_field(
 }
 
 fn strip_html(s: &str) -> String {
-    let re = regex::Regex::new(r"<[^>]+>").unwrap();
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"<[^>]+>").unwrap());
     let stripped = re.replace_all(s, "");
     html_escape::decode_html_entities(&stripped).to_string()
 }
