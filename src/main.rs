@@ -596,15 +596,17 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
             separator();
 
             if action.contains("知識圖譜") {
-                // search_query = "{parent_display} {node}" so context is preserved
-                let search_q = format!("{} {}", current_display, node_name);
+                // Append to the full accumulated search context so deeper hops
+                // carry the complete ancestry (e.g. "Apache Pulsar Brokers & Bookies Metadata"
+                // rather than just "Brokers & Bookies Metadata").
+                let search_q = format!("{} {}", current_search, node_name);
                 nav.push((node_name.clone(), search_q, None));
                 continue 'nav;
             }
 
             if action.contains("GitHub Repos") {
                 if let Some(repo) = kg_github_search(&node_name, cfg, llm).await {
-                    let search_q = format!("{} {}", current_display, repo);
+                    let search_q = format!("{} {}", current_search, repo);
                     nav.push((repo.clone(), search_q, None));
                     continue 'nav;
                 }
