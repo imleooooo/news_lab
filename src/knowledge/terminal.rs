@@ -24,22 +24,35 @@ fn render_cluster(cluster: &KGCluster) {
         return;
     }
 
-    println!(
-        "  {} {}",
-        style("◆").cyan().bold(),
-        style(&cluster.name).bold().white()
-    );
+    let is_github = cluster.name == "GitHub Repos";
+
+    if is_github {
+        println!(
+            "  {} {}",
+            style("▲").green().bold(),
+            style(&cluster.name).bold().white()
+        );
+    } else {
+        println!(
+            "  {} {}",
+            style("◆").cyan().bold(),
+            style(&cluster.name).bold().white()
+        );
+    }
 
     let last = cluster.nodes.len() - 1;
     for (i, node) in cluster.nodes.iter().enumerate() {
         let branch = if i == last { "└─" } else { "├─" };
-        let name_styled = style(&node.name).yellow().to_string();
         let name_display_w = display_width(&node.name);
+        let name_styled = if is_github {
+            style(&node.name).green().to_string()
+        } else {
+            style(&node.name).yellow().to_string()
+        };
 
         if node.description.is_empty() {
             println!("    {} {}", branch, name_styled);
         } else {
-            // Pad name column to 22 display chars for alignment
             let col_w = 22usize;
             let pad = col_w.saturating_sub(name_display_w);
             println!(

@@ -400,31 +400,204 @@ async fn run_podcast_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
 
 // ── Run: Knowledge Graph ───────────────────────────────────────────────────────
 
-async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()> {
-    let fetch_n = cfg.max_results.max(10);
-    let spinner = Spinner::new(&format!("正在抓取技術資料：{}", kw));
-    let items = fetch_tech_news(kw, fetch_n).await;
-    spinner.finish(&format!("取得 {} 筆資料", items.len()));
+/// Fetch GitHub repos for `node`, summarize, then let the user optionally
+/// drill into one repo as a new KG keyword.
+/// Returns `Some(repo_name)` to push onto nav_stack, `None` to go back.
+async fn kg_github_search(node: &str, cfg: &Config, llm: &LLMClient) -> Option<String> {
+    let max = cfg.max_results.max(5);
+    let spinner = Spinner::new(&format!("搜尋 GitHub Repos：{}", node));
+    let items = fetch_github(node, max).await;
+    spinner.finish(&format!("找到 {} 個專案", items.len()));
 
     if items.is_empty() {
-        panel("知識圖譜", "找不到足夠的技術資料。", "yellow");
-        return Ok(());
+        panel("GitHub Repos", "找不到相關開源專案。", "yellow");
+        return None;
     }
 
-    let spinner = Spinner::new("LLM 建構知識圖譜...");
-    let kg = knowledge::extract_knowledge_graph(&items, kw, llm).await?;
-    spinner.finish(&format!(
-        "識別出 {} 個分類、{} 個關係",
-        kg.clusters.len(),
-        kg.relations.len()
-    ));
+    let mut repo_titles: Vec<String> = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let spinner = Spinner::new(&format!("摘要第 {}/{} 個專案...", i + 1, items.len()));
+        let summary = summarize_one(item, node, llm).await;
+        spinner.finish("");
 
-    if kg.clusters.is_empty() {
-        panel("知識圖譜", "無法從資料中建構知識圖譜。", "yellow");
-        return Ok(());
+        let date_str = item
+            .published
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "未知".to_string());
+        let content = format!("最後推送: {}\n\n{}", date_str, summary);
+        let title = format!("[{}] {}", i + 1, item.title);
+        panel(&title, &content, "green");
+        print_url(&item.url);
+        separator();
+        repo_titles.push(item.title.clone());
     }
 
-    knowledge::terminal::render_knowledge_graph(&kg);
+    // Let user pick a repo to drill into as KG, or go back
+    let mut choices = vec!["← 返回".to_string()];
+    choices.extend(repo_titles.iter().map(|t| format!("▲ {} — 深入知識圖譜", t)));
+
+    let sel = Select::new("選擇要深入的專案:", choices)
+        .prompt()
+        .unwrap_or_else(|_| "← 返回".to_string());
+
+    if sel.starts_with("←") {
+        return None;
+    }
+
+    // "▲ owner/repo — 深入知識圖譜" → extract repo name
+    sel.strip_prefix("▲ ")
+        .and_then(|s| s.split(" — ").next())
+        .map(|s| s.to_string())
+}
+
+async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()> {
+    let fetch_n = cfg.max_results.max(10);
+    let mut nav_stack: Vec<String> = vec![kw.to_string()];
+
+    // ── Outer loop: each iteration fetches + renders KG for nav_stack.last() ──
+    'nav: loop {
+        let current_kw = nav_stack.last().unwrap().clone();
+
+        // Breadcrumb (only when drilled in)
+        if nav_stack.len() > 1 {
+            println!(
+                "\n  {} {}",
+                style("路徑:").dim(),
+                style(nav_stack.join(" › ")).cyan()
+            );
+            println!();
+        }
+
+        let spinner = Spinner::new(&format!("正在抓取技術資料：{}", current_kw));
+        let items = fetch_tech_news(&current_kw, fetch_n).await;
+        spinner.finish(&format!("取得 {} 筆資料", items.len()));
+
+        if items.is_empty() {
+            panel("知識圖譜", "找不到足夠的技術資料。", "yellow");
+            if nav_stack.len() > 1 {
+                nav_stack.pop();
+                continue 'nav;
+            }
+            return Ok(());
+        }
+
+        let spinner = Spinner::new("LLM 建構知識圖譜...");
+        let kg = knowledge::extract_knowledge_graph(&items, &current_kw, llm).await?;
+        spinner.finish(&format!(
+            "識別出 {} 個分類、{} 個關係",
+            kg.clusters.len(),
+            kg.relations.len()
+        ));
+
+        if kg.clusters.is_empty() {
+            panel("知識圖譜", "無法從資料中建構知識圖譜。", "yellow");
+            if nav_stack.len() > 1 {
+                nav_stack.pop();
+                continue 'nav;
+            }
+            return Ok(());
+        }
+
+        knowledge::terminal::render_knowledge_graph(&kg);
+
+        // ── Inner loop: node selection (no re-fetch on GitHub return) ─────────
+        'menu: loop {
+            // Build flat node list: (choice_string, cluster_name, node_name)
+            let mut node_index: Vec<(String, String)> = Vec::new();
+            let mut choices: Vec<String> = vec!["← 返回".to_string()];
+
+            for cluster in &kg.clusters {
+                let icon = if cluster.name == "GitHub Repos" { "▲" } else { "◆" };
+                for node in &cluster.nodes {
+                    let line = if node.description.is_empty() {
+                        format!("{} [{}]  {}", icon, cluster.name, node.name)
+                    } else {
+                        format!("{} [{}]  {}  — {}", icon, cluster.name, node.name, node.description)
+                    };
+                    choices.push(line);
+                    node_index.push((cluster.name.clone(), node.name.clone()));
+                }
+            }
+
+            let back_label = if nav_stack.len() > 1 {
+                "← 返回上一層"
+            } else {
+                "← 返回主選單"
+            };
+
+            // Replace first choice with correct label
+            choices[0] = back_label.to_string();
+
+            let sel = Select::new(
+                &format!("「{}」知識圖譜 — 選擇節點:", current_kw),
+                choices,
+            )
+            .prompt()
+            .unwrap_or_else(|_| back_label.to_string());
+
+            if sel == back_label {
+                if nav_stack.len() > 1 {
+                    nav_stack.pop();
+                    separator();
+                    continue 'nav;
+                }
+                break 'nav;
+            }
+
+            // Find which node was chosen
+            let chosen_offset = node_index
+                .iter()
+                .enumerate()
+                .find(|(_i, (c, n))| {
+                    let icon = if c == "GitHub Repos" { "▲" } else { "◆" };
+                    let base = format!("{} [{}]  {}", icon, c, n);
+                    sel.starts_with(&base)
+                })
+                .map(|(i, _)| i);
+
+            let Some(idx) = chosen_offset else {
+                continue 'menu;
+            };
+            let (cluster_name, node_name) = node_index[idx].clone();
+
+            separator();
+
+            let is_github = cluster_name == "GitHub Repos";
+            let start_cursor: usize = if is_github { 1 } else { 0 };
+
+            let action = Select::new(
+                &format!("「{}」— 選擇動作:", node_name),
+                vec![
+                    "知識圖譜 — 深入搜尋".to_string(),
+                    "GitHub Repos — 搜尋開源專案".to_string(),
+                    "← 返回".to_string(),
+                ],
+            )
+            .with_starting_cursor(start_cursor)
+            .prompt()
+            .unwrap_or_else(|_| "← 返回".to_string());
+
+            if action.starts_with("←") {
+                continue 'menu; // back to node list, no re-fetch
+            }
+
+            separator();
+
+            if action.contains("知識圖譜") {
+                nav_stack.push(node_name.clone());
+                continue 'nav;
+            }
+
+            if action.contains("GitHub Repos") {
+                if let Some(repo) = kg_github_search(&node_name, cfg, llm).await {
+                    nav_stack.push(repo);
+                    continue 'nav;
+                }
+                continue 'menu; // user went back from GitHub, stay on node list
+            }
+        }
+    }
+
     Ok(())
 }
 
