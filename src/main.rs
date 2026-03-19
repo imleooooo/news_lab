@@ -129,18 +129,14 @@ async fn run_news_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()>
         fetch_all_rss(&en_kw, &zh_kw, max),
     );
 
-    // HN: light relevance filter — ALL tokens of the *original* keyword must appear
-    // in title+description combined.  Algolia already handles query relevance;
-    // this only removes clearly off-topic results (e.g. "AI telecom" for "GPU Infra").
+    // HN: light relevance filter — at least ONE expanded keyword (en_kw) must appear
+    // in title+description combined.  We use expanded terms so that results fetched
+    // via "ray serve" / "ray operator" are not discarded when the raw query is "kuberay".
     // HN link posts (empty story_text) are intentionally kept — show title + URL.
-    let orig_tokens: Vec<String> = kw
-        .split_whitespace()
-        .filter(|w| w.len() > 1)
-        .map(|w| w.to_lowercase())
-        .collect();
+    let en_kw_lower: Vec<String> = en_kw.iter().map(|k| k.to_lowercase()).collect();
     let hn_filtered = hn.into_iter().filter(|item| !item.url.contains("github.com")).filter(
         |item| {
-            if orig_tokens.is_empty() {
+            if en_kw_lower.is_empty() {
                 return true;
             }
             let combined = format!(
@@ -148,7 +144,7 @@ async fn run_news_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()>
                 item.title.to_lowercase(),
                 item.description.to_lowercase()
             );
-            orig_tokens.iter().all(|t| combined.contains(t.as_str()))
+            en_kw_lower.iter().any(|k| combined.contains(k.as_str()))
         },
     );
 
@@ -898,7 +894,10 @@ async fn main() -> Result<()> {
         })
         .init();
 
-    if std::env::var("OPENAI_API_KEY").is_err() {
+    let api_key_ok = std::env::var("OPENAI_API_KEY")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if !api_key_ok {
         eprintln!(
             "\n  {} 請設定 OPENAI_API_KEY 環境變數，或在 {} 加入 OPENAI_API_KEY=sk-...",
             style("✗").red().bold(),

@@ -444,7 +444,7 @@ fn parse_rss_items(xml: &str, source: &str, keywords: &[String], max: usize) -> 
         .iter()
         .map(|k| {
             k.split_whitespace()
-                .filter(|w| w.len() > 2 && w.starts_with(|c: char| c.is_alphanumeric()))
+                .filter(|w| w.len() > 1 && w.starts_with(|c: char| c.is_alphanumeric()))
                 .take(2)
                 .map(|w| w.to_string())
                 .collect::<Vec<String>>()
