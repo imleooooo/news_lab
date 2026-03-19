@@ -596,17 +596,18 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
             separator();
 
             if action.contains("知識圖譜") {
-                // search_query = "{root_kw} {node_name}": root provides domain
-                // context without over-constraining deeper hops (full ancestry
-                // concatenation makes queries too specific and returns 0 results).
-                let search_q = format!("{} {}", kw, node_name);
+                // "{root} {parent} {node}": 3 tokens — root scopes the domain,
+                // parent disambiguates same-named nodes (e.g. "Security" under
+                // different parents), node focuses the search.
+                // Avoids full-ancestry bloat while preserving immediate context.
+                let search_q = format!("{} {} {}", kw, current_display, node_name);
                 nav.push((node_name.clone(), search_q, None));
                 continue 'nav;
             }
 
             if action.contains("GitHub Repos") {
                 if let Some(repo) = kg_github_search(&node_name, cfg, llm).await {
-                    let search_q = format!("{} {}", kw, repo);
+                    let search_q = format!("{} {} {}", kw, current_display, repo);
                     nav.push((repo.clone(), search_q, None));
                     continue 'nav;
                 }
