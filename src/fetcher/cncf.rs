@@ -186,6 +186,63 @@ fn urlencoding(s: &str) -> String {
         .collect()
 }
 
+// ── Keyword search ─────────────────────────────────────────────────────────────
+
+/// Search GitHub repos that have the `cncf` topic and match `kw`.
+pub async fn fetch_cncf_by_keyword(kw: &str, max: usize) -> Vec<CNCFProject> {
+    let token = std::env::var("GITHUB_TOKEN").ok();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("news_lab/0.1")
+        .build()
+        .unwrap_or_default();
+
+    let query = format!("{} topic:cncf", urlencoding(kw));
+    let url = format!(
+        "https://api.github.com/search/repositories?q={}&sort=stars&order=desc&per_page={}",
+        query,
+        max.min(30)
+    );
+    let mut req = client.get(&url);
+    if let Some(ref tok) = token {
+        req = req.header("Authorization", format!("token {}", tok));
+    }
+    let Ok(resp) = req.send().await else {
+        return vec![];
+    };
+    let Ok(result) = resp.json::<SearchResult>().await else {
+        return vec![];
+    };
+
+    result
+        .items
+        .into_iter()
+        .take(max)
+        .map(|r| {
+            let last_updated = r
+                .pushed_at
+                .as_deref()
+                .and_then(|s| s.parse::<DateTime<Utc>>().ok());
+            CNCFProject {
+                name: r
+                    .full_name
+                    .split('/')
+                    .nth(1)
+                    .unwrap_or(&r.full_name)
+                    .to_string(),
+                full_name: r.full_name.clone(),
+                url: r.html_url,
+                description: r.description.unwrap_or_default(),
+                stars: r.stargazers_count,
+                language: r.language,
+                last_updated,
+                maturity: String::new(), // not available from search API
+                accepted_at: None,
+            }
+        })
+        .collect()
+}
+
 // ── Main fetch ─────────────────────────────────────────────────────────────────
 
 pub async fn fetch_cncf_projects(max: usize) -> Vec<CNCFProject> {

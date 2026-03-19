@@ -12,7 +12,7 @@ use config::{configure, Config};
 use console::style;
 use fetcher::{
     arxiv::fetch_domain_papers,
-    cncf::fetch_cncf_projects,
+    cncf::{fetch_cncf_by_keyword, fetch_cncf_projects},
     huggingface::{fetch_hf_models, fmt_num, HFSort},
     podcast::fetch_podcast_content,
     tech::{
@@ -473,25 +473,27 @@ async fn kg_github_search(node: &str, cfg: &Config, llm: &LLMClient) -> Option<S
 async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()> {
     let fetch_n = cfg.max_results.max(10);
 
-    // nav: (display_name, search_query, cached_kg)
-    // display_name = shown in breadcrumb / KG title / menus
-    // search_query = passed to fetch_tech_news; for drill-downs it includes
-    //   the parent display_name as context so "Brokers & Bookies" searches
-    //   as "Apache Pulsar Brokers & Bookies" instead of the bare term.
-    // Cached KGs survive back-navigation (no re-fetch on ← 返回上一層).
-    let mut nav: Vec<(String, String, Option<knowledge::KnowledgeGraph>)> =
-        vec![(kw.to_string(), kw.to_string(), None)];
+    // nav: (display_name, full_search_query, node_term, cached_kg)
+    // display_name     – shown in breadcrumb / KG title / menus
+    // full_search_query – "{root} {parent_display} {node_term}" (passed to fetch_tech_news)
+    // node_term         – translated leaf-node search word(s), stored separately so
+    //                     fallback queries can be built as ("{kw} {node_term}", "{node_term}")
+    //                     without splitting the compound string (which breaks on multi-word
+    //                     root/parent components).
+    // cached_kg         – survives back-navigation (no re-fetch on ← 返回上一層)
+    let mut nav: Vec<(String, String, String, Option<knowledge::KnowledgeGraph>)> =
+        vec![(kw.to_string(), kw.to_string(), kw.to_string(), None)];
 
     // ── Outer loop: one iteration per KG level ────────────────────────────────
     'nav: loop {
-        let (current_display, current_search) = {
+        let (current_display, current_search, current_node_term) = {
             let e = nav.last().unwrap();
-            (e.0.clone(), e.1.clone())
+            (e.0.clone(), e.1.clone(), e.2.clone())
         };
 
         // Breadcrumb
         if nav.len() > 1 {
-            let crumb: Vec<&str> = nav.iter().map(|(d, _, _)| d.as_str()).collect();
+            let crumb: Vec<&str> = nav.iter().map(|(d, _, _, _)| d.as_str()).collect();
             println!(
                 "\n  {} {}",
                 style("路徑:").dim(),
@@ -501,23 +503,19 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
         }
 
         // Fetch + build KG only when not yet cached for this level
-        if nav.last().unwrap().2.is_none() {
+        if nav.last().unwrap().3.is_none() {
             // Adaptive fallback: try progressively shorter queries until we get results.
-            // "{root} {parent} {node}" (3 tokens) → "{root} {node}" (2) → "{node}" (1)
-            let fallback_queries: Vec<String> = {
-                let parts: Vec<&str> = current_search.splitn(3, ' ').collect();
-                match parts.len() {
-                    3 => vec![
-                        current_search.clone(),                       // root parent node
-                        format!("{} {}", parts[0], parts[2]),         // root node
-                        parts[2].to_string(),                         // node only
-                    ],
-                    2 => vec![
-                        current_search.clone(),                       // root node
-                        parts[1].to_string(),                         // node only
-                    ],
-                    _ => vec![current_search.clone()],
-                }
+            // "{root} {parent} {node_term}" → "{root} {node_term}" → "{node_term}"
+            // Uses `current_node_term` (the leaf word only) to avoid splitting
+            // multi-word root/parent components that were stored as a single string.
+            let fallback_queries: Vec<String> = if nav.len() == 1 {
+                vec![current_search.clone()]
+            } else {
+                vec![
+                    current_search.clone(),
+                    format!("{} {}", kw, current_node_term),
+                    current_node_term.clone(),
+                ]
             };
 
             let mut items = vec![];
@@ -560,11 +558,11 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
                 continue 'nav;
             }
 
-            nav.last_mut().unwrap().2 = Some(kg);
+            nav.last_mut().unwrap().3 = Some(kg);
         }
 
         // Clone KG out of nav so 'menu loop can borrow nav mutably later
-        let kg = nav.last().unwrap().2.as_ref().unwrap().clone();
+        let kg = nav.last().unwrap().3.as_ref().unwrap().clone();
         knowledge::terminal::render_knowledge_graph(&kg);
 
         // ── Inner loop: node selection (no re-fetch on GitHub return) ─────────
@@ -652,14 +650,14 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
                 // first so HN/GitHub searches can match.
                 let node_search = translate_if_cjk(&node_name, llm).await;
                 let search_q = format!("{} {} {}", kw, current_display, node_search);
-                nav.push((node_name.clone(), search_q, None));
+                nav.push((node_name.clone(), search_q, node_search, None));
                 continue 'nav;
             }
 
             if action.contains("GitHub Repos") {
                 if let Some(repo) = kg_github_search(&node_name, cfg, llm).await {
                     let search_q = format!("{} {} {}", kw, current_display, repo);
-                    nav.push((repo.clone(), search_q, None));
+                    nav.push((repo.clone(), search_q, repo.clone(), None));
                     continue 'nav;
                 }
                 continue 'menu;
@@ -1028,15 +1026,45 @@ async fn run_hf_summary(llm: &LLMClient) -> Result<()> {
 // ── Run: CNCF Project Summary ──────────────────────────────────────────────────
 
 async fn run_cncf_summary(cfg: &Config, llm: &LLMClient) -> Result<()> {
+    let mode = Select::new(
+        "CNCF 專案整理 — 選擇模式:",
+        vec![
+            "關鍵字搜尋  — 搜尋特定主題的 CNCF 專案",
+            "最近值得關注 — 最近加入或畢業的 CNCF 專案",
+        ],
+    )
+    .prompt()
+    .unwrap_or("最近值得關注 — 最近加入或畢業的 CNCF 專案");
+
+    separator();
+
     let max = cfg.max_results.max(10);
-    let spinner = Spinner::new("正在從 CNCF TOC 抓取最近專案...");
-    let projects = fetch_cncf_projects(max).await;
-    spinner.finish(&format!("取得 {} 個 CNCF 專案", projects.len()));
+
+    let projects = if mode.contains("關鍵字") {
+        let kw_input = Text::new("輸入搜尋關鍵字 (英文):")
+            .prompt()
+            .unwrap_or_default();
+        let kw = kw_input.trim();
+        if kw.is_empty() {
+            panel("CNCF 專案整理", "請輸入關鍵字。", "yellow");
+            return Ok(());
+        }
+        separator();
+        let spinner = Spinner::new(&format!("搜尋 CNCF 專案：{}", kw));
+        let result = fetch_cncf_by_keyword(kw, max).await;
+        spinner.finish(&format!("找到 {} 個 CNCF 專案", result.len()));
+        result
+    } else {
+        let spinner = Spinner::new("正在從 CNCF TOC 抓取最近專案...");
+        let result = fetch_cncf_projects(max).await;
+        spinner.finish(&format!("取得 {} 個 CNCF 專案", result.len()));
+        result
+    };
 
     if projects.is_empty() {
         panel(
             "CNCF 專案整理",
-            "無法取得 CNCF 專案資料，建議設定 GITHUB_TOKEN 環境變數以避免 API 限速。",
+            "找不到相關 CNCF 專案，建議設定 GITHUB_TOKEN 環境變數以避免 API 限速。",
             "yellow",
         );
         return Ok(());
@@ -1050,12 +1078,18 @@ async fn run_cncf_summary(cfg: &Config, llm: &LLMClient) -> Result<()> {
         let maturity_icon = match project.maturity.as_str() {
             "graduated" => "🎓",
             "incubating" => "🌱",
+            "" => "☁",
             _ => "🔬",
+        };
+        let maturity_display = if project.maturity.is_empty() {
+            "cncf".to_string()
+        } else {
+            project.maturity.clone()
         };
         let accepted_str = project
             .accepted_at
             .map(|d| d.format("%Y-%m-%d").to_string())
-            .unwrap_or_else(|| "未知".to_string());
+            .unwrap_or_else(|| "—".to_string());
         let updated_str = project
             .last_updated
             .map(|d| d.format("%Y-%m-%d").to_string())
@@ -1064,7 +1098,7 @@ async fn run_cncf_summary(cfg: &Config, llm: &LLMClient) -> Result<()> {
         let content = format!(
             "{} {} | ⭐ {} stars | 語言: {}\n加入: {} | 最後更新: {}\n\n{}",
             maturity_icon,
-            project.maturity,
+            maturity_display,
             project.stars,
             project.language.as_deref().unwrap_or("未知"),
             accepted_str,
