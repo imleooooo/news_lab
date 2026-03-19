@@ -265,7 +265,15 @@ pub async fn fetch_cncf_by_keyword(kw: &str, max: usize) -> Vec<CNCFProject> {
 
 // ── Main fetch ─────────────────────────────────────────────────────────────────
 
-pub async fn fetch_cncf_projects(max: usize) -> Vec<CNCFProject> {
+/// `maturity_filter`:
+/// - `None`               → all levels (graduated + incubating + sandbox)
+/// - `Some("graduated")`  → graduated only
+/// - `Some("incubating")` → incubating only
+/// - `Some("sandbox")`    → sandbox only
+pub async fn fetch_cncf_projects(
+    max: usize,
+    maturity_filter: Option<&str>,
+) -> Vec<CNCFProject> {
     let token = std::env::var("GITHUB_TOKEN").ok();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -274,17 +282,23 @@ pub async fn fetch_cncf_projects(max: usize) -> Vec<CNCFProject> {
         .unwrap_or_default();
 
     // (label, maturity string)
-    let level_labels = [
+    const ALL_LEVELS: &[(&str, &str)] = &[
         ("level%2Fgraduation", "graduated"),
         ("level%2Fincubation", "incubating"),
         ("level%2Fsandbox", "sandbox"),
     ];
+    let level_labels: &[(&str, &str)] = match maturity_filter {
+        Some("graduated") => &ALL_LEVELS[..1],
+        Some("incubating") => &ALL_LEVELS[1..2],
+        Some("sandbox") => &ALL_LEVELS[2..],
+        _ => ALL_LEVELS,
+    };
 
     // Collect (name, maturity, accepted_at, repo_hint) candidates
     type Candidate = (String, String, Option<DateTime<Utc>>, Option<String>);
     let mut candidates: Vec<Candidate> = Vec::new();
 
-    for (label, maturity) in &level_labels {
+    for (label, maturity) in level_labels {
         let url = format!(
             "https://api.github.com/repos/cncf/toc/issues?state=closed&labels={}&sort=updated&direction=desc&per_page=50",
             label

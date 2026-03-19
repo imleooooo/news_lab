@@ -1055,8 +1055,32 @@ async fn run_cncf_summary(cfg: &Config, llm: &LLMClient) -> Result<()> {
         spinner.finish(&format!("找到 {} 個 CNCF 專案", result.len()));
         result
     } else {
+        let maturity_choice = Select::new(
+            "篩選成熟度:",
+            vec![
+                "全部       — Graduated + Incubating + Sandbox",
+                "Graduated  — 已畢業",
+                "Incubating — 孵化中",
+                "Sandbox    — 沙盒",
+            ],
+        )
+        .prompt()
+        .unwrap_or("全部       — Graduated + Incubating + Sandbox");
+
+        separator();
+
+        let maturity_filter = if maturity_choice.contains("Graduated") && !maturity_choice.contains("全部") {
+            Some("graduated")
+        } else if maturity_choice.contains("Incubating") {
+            Some("incubating")
+        } else if maturity_choice.contains("Sandbox") {
+            Some("sandbox")
+        } else {
+            None
+        };
+
         let spinner = Spinner::new("正在從 CNCF TOC 抓取最近專案...");
-        let result = fetch_cncf_projects(max).await;
+        let result = fetch_cncf_projects(max, maturity_filter).await;
         spinner.finish(&format!("取得 {} 個 CNCF 專案", result.len()));
         result
     };
