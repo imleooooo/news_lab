@@ -532,17 +532,21 @@ fn parse_rss_items(xml: &str, source: &str, keywords: &[String], max: usize) -> 
                         continue;
                     }
 
-                    // Keyword filter: full keyword phrase appears OR any single token appears.
-                    let title_lower = f_title.to_lowercase();
-                    let desc_lower = f_desc.to_lowercase();
-                    let combined = format!("{} {}", title_lower, desc_lower);
-                    let matches = kw_lower.iter().any(|k| combined.contains(k.as_str()))
-                        || phrase_tokens.iter().any(|tokens| {
-                            tokens.iter().all(|t| combined.contains(t.as_str()))
-                        });
-                    if !matches {
-                        buf.clear();
-                        continue;
+                    // Keyword filter: skipped when keywords is empty (e.g. Medium tag feeds
+                    // where the URL already scopes relevance). Otherwise, full keyword phrase
+                    // appears OR the first ≤2 tokens of any phrase all appear.
+                    if !kw_lower.is_empty() {
+                        let title_lower = f_title.to_lowercase();
+                        let desc_lower = f_desc.to_lowercase();
+                        let combined = format!("{} {}", title_lower, desc_lower);
+                        let matches = kw_lower.iter().any(|k| combined.contains(k.as_str()))
+                            || phrase_tokens.iter().any(|tokens| {
+                                tokens.iter().all(|t| combined.contains(t.as_str()))
+                            });
+                        if !matches {
+                            buf.clear();
+                            continue;
+                        }
                     }
 
                     // Parse date: try RFC 2822 (RSS) then RFC 3339 (Atom)
@@ -689,12 +693,13 @@ pub async fn fetch_medium_rss(en_kw: &[String], max: usize) -> Vec<NewsItem> {
         .enumerate()
         .map(|(i, slug)| {
             let url = format!("https://medium.com/feed/tag/{}", slug);
-            let kw_clone = en_kw.to_vec();
             async move {
                 tokio::time::sleep(std::time::Duration::from_millis(i as u64 * 300)).await;
                 tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    fetch_rss_feed(&url, "Medium", &kw_clone, per_slug),
+                    // Pass &[] so parse_rss_items skips keyword filtering —
+                    // the tag URL already scopes relevance.
+                    fetch_rss_feed(&url, "Medium", &[], per_slug),
                 )
                 .await
                 .unwrap_or_default()
