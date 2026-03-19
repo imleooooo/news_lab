@@ -401,6 +401,26 @@ async fn run_podcast_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
 // ── Run: Knowledge Graph ───────────────────────────────────────────────────────
 
 /// Fetch GitHub repos for `node`, summarize, then let the user optionally
+/// If `s` contains CJK characters, ask the LLM for a short English equivalent
+/// suitable for use as a search keyword. Returns the original string otherwise.
+async fn translate_if_cjk(s: &str, llm: &LLMClient) -> String {
+    if !s.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c)) {
+        return s.to_string();
+    }
+    let prompt = format!(
+        "Translate the following technical term to a concise English search keyword (≤4 words, no explanation): {}",
+        s
+    );
+    llm.invoke(&prompt)
+        .await
+        .unwrap_or_else(|_| s.to_string())
+        .lines()
+        .next()
+        .unwrap_or(s)
+        .trim()
+        .to_string()
+}
+
 /// drill into one repo as a new KG keyword.
 /// Returns `Some(repo_name)` to push onto nav_stack, `None` to go back.
 async fn kg_github_search(node: &str, cfg: &Config, llm: &LLMClient) -> Option<String> {
@@ -600,7 +620,10 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
                 // parent disambiguates same-named nodes (e.g. "Security" under
                 // different parents), node focuses the search.
                 // Avoids full-ancestry bloat while preserving immediate context.
-                let search_q = format!("{} {} {}", kw, current_display, node_name);
+                // If node_name contains Chinese characters, translate to English
+                // first so HN/GitHub searches can match.
+                let node_search = translate_if_cjk(&node_name, llm).await;
+                let search_q = format!("{} {} {}", kw, current_display, node_search);
                 nav.push((node_name.clone(), search_q, None));
                 continue 'nav;
             }
