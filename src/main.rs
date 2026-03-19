@@ -453,19 +453,25 @@ async fn kg_github_search(node: &str, cfg: &Config, llm: &LLMClient) -> Option<S
 async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()> {
     let fetch_n = cfg.max_results.max(10);
 
-    // nav: (keyword, cached_kg).  KG is None until first fetch for that level.
-    // Cached KGs survive back-navigation so the parent graph is re-rendered
-    // from memory instead of being re-fetched (fixes nondeterministic back-nav).
-    let mut nav: Vec<(String, Option<knowledge::KnowledgeGraph>)> =
-        vec![(kw.to_string(), None)];
+    // nav: (display_name, search_query, cached_kg)
+    // display_name = shown in breadcrumb / KG title / menus
+    // search_query = passed to fetch_tech_news; for drill-downs it includes
+    //   the parent display_name as context so "Brokers & Bookies" searches
+    //   as "Apache Pulsar Brokers & Bookies" instead of the bare term.
+    // Cached KGs survive back-navigation (no re-fetch on ← 返回上一層).
+    let mut nav: Vec<(String, String, Option<knowledge::KnowledgeGraph>)> =
+        vec![(kw.to_string(), kw.to_string(), None)];
 
     // ── Outer loop: one iteration per KG level ────────────────────────────────
     'nav: loop {
-        let current_kw = nav.last().unwrap().0.clone();
+        let (current_display, current_search) = {
+            let e = nav.last().unwrap();
+            (e.0.clone(), e.1.clone())
+        };
 
         // Breadcrumb
         if nav.len() > 1 {
-            let crumb: Vec<&str> = nav.iter().map(|(k, _)| k.as_str()).collect();
+            let crumb: Vec<&str> = nav.iter().map(|(d, _, _)| d.as_str()).collect();
             println!(
                 "\n  {} {}",
                 style("路徑:").dim(),
@@ -475,9 +481,9 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
         }
 
         // Fetch + build KG only when not yet cached for this level
-        if nav.last().unwrap().1.is_none() {
-            let spinner = Spinner::new(&format!("正在抓取技術資料：{}", current_kw));
-            let items = fetch_tech_news(&current_kw, fetch_n).await;
+        if nav.last().unwrap().2.is_none() {
+            let spinner = Spinner::new(&format!("正在抓取技術資料：{}", current_display));
+            let items = fetch_tech_news(&current_search, fetch_n).await;
             spinner.finish(&format!("取得 {} 筆資料", items.len()));
 
             if items.is_empty() {
@@ -490,7 +496,7 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
             }
 
             let spinner = Spinner::new("LLM 建構知識圖譜...");
-            let kg = knowledge::extract_knowledge_graph(&items, &current_kw, llm).await?;
+            let kg = knowledge::extract_knowledge_graph(&items, &current_display, llm).await?;
             spinner.finish(&format!(
                 "識別出 {} 個分類、{} 個關係",
                 kg.clusters.len(),
@@ -506,11 +512,11 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
                 continue 'nav;
             }
 
-            nav.last_mut().unwrap().1 = Some(kg);
+            nav.last_mut().unwrap().2 = Some(kg);
         }
 
         // Clone KG out of nav so 'menu loop can borrow nav mutably later
-        let kg = nav.last().unwrap().1.as_ref().unwrap().clone();
+        let kg = nav.last().unwrap().2.as_ref().unwrap().clone();
         knowledge::terminal::render_knowledge_graph(&kg);
 
         // ── Inner loop: node selection (no re-fetch on GitHub return) ─────────
@@ -543,7 +549,7 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
             }
 
             let sel = Select::new(
-                &format!("「{}」知識圖譜 — 選擇節點:", current_kw),
+                &format!("「{}」知識圖譜 — 選擇節點:", current_display),
                 choices,
             )
             .prompt()
@@ -590,13 +596,16 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
             separator();
 
             if action.contains("知識圖譜") {
-                nav.push((node_name.clone(), None));
+                // search_query = "{parent_display} {node}" so context is preserved
+                let search_q = format!("{} {}", current_display, node_name);
+                nav.push((node_name.clone(), search_q, None));
                 continue 'nav;
             }
 
             if action.contains("GitHub Repos") {
                 if let Some(repo) = kg_github_search(&node_name, cfg, llm).await {
-                    nav.push((repo, None));
+                    let search_q = format!("{} {}", current_display, repo);
+                    nav.push((repo.clone(), search_q, None));
                     continue 'nav;
                 }
                 continue 'menu;
