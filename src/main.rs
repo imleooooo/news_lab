@@ -452,59 +452,79 @@ async fn kg_github_search(node: &str, cfg: &Config, llm: &LLMClient) -> Option<S
 
 async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()> {
     let fetch_n = cfg.max_results.max(10);
-    let mut nav_stack: Vec<String> = vec![kw.to_string()];
 
-    // ── Outer loop: each iteration fetches + renders KG for nav_stack.last() ──
+    // nav: (keyword, cached_kg).  KG is None until first fetch for that level.
+    // Cached KGs survive back-navigation so the parent graph is re-rendered
+    // from memory instead of being re-fetched (fixes nondeterministic back-nav).
+    let mut nav: Vec<(String, Option<knowledge::KnowledgeGraph>)> =
+        vec![(kw.to_string(), None)];
+
+    // ── Outer loop: one iteration per KG level ────────────────────────────────
     'nav: loop {
-        let current_kw = nav_stack.last().unwrap().clone();
+        let current_kw = nav.last().unwrap().0.clone();
 
-        // Breadcrumb (only when drilled in)
-        if nav_stack.len() > 1 {
+        // Breadcrumb
+        if nav.len() > 1 {
+            let crumb: Vec<&str> = nav.iter().map(|(k, _)| k.as_str()).collect();
             println!(
                 "\n  {} {}",
                 style("路徑:").dim(),
-                style(nav_stack.join(" › ")).cyan()
+                style(crumb.join(" › ")).cyan()
             );
             println!();
         }
 
-        let spinner = Spinner::new(&format!("正在抓取技術資料：{}", current_kw));
-        let items = fetch_tech_news(&current_kw, fetch_n).await;
-        spinner.finish(&format!("取得 {} 筆資料", items.len()));
+        // Fetch + build KG only when not yet cached for this level
+        if nav.last().unwrap().1.is_none() {
+            let spinner = Spinner::new(&format!("正在抓取技術資料：{}", current_kw));
+            let items = fetch_tech_news(&current_kw, fetch_n).await;
+            spinner.finish(&format!("取得 {} 筆資料", items.len()));
 
-        if items.is_empty() {
-            panel("知識圖譜", "找不到足夠的技術資料。", "yellow");
-            if nav_stack.len() > 1 {
-                nav_stack.pop();
+            if items.is_empty() {
+                panel("知識圖譜", "找不到足夠的技術資料。", "yellow");
+                nav.pop();
+                if nav.is_empty() {
+                    return Ok(());
+                }
+                continue 'nav; // back to cached parent
+            }
+
+            let spinner = Spinner::new("LLM 建構知識圖譜...");
+            let kg = knowledge::extract_knowledge_graph(&items, &current_kw, llm).await?;
+            spinner.finish(&format!(
+                "識別出 {} 個分類、{} 個關係",
+                kg.clusters.len(),
+                kg.relations.len()
+            ));
+
+            if kg.clusters.is_empty() {
+                panel("知識圖譜", "無法從資料中建構知識圖譜。", "yellow");
+                nav.pop();
+                if nav.is_empty() {
+                    return Ok(());
+                }
                 continue 'nav;
             }
-            return Ok(());
+
+            nav.last_mut().unwrap().1 = Some(kg);
         }
 
-        let spinner = Spinner::new("LLM 建構知識圖譜...");
-        let kg = knowledge::extract_knowledge_graph(&items, &current_kw, llm).await?;
-        spinner.finish(&format!(
-            "識別出 {} 個分類、{} 個關係",
-            kg.clusters.len(),
-            kg.relations.len()
-        ));
-
-        if kg.clusters.is_empty() {
-            panel("知識圖譜", "無法從資料中建構知識圖譜。", "yellow");
-            if nav_stack.len() > 1 {
-                nav_stack.pop();
-                continue 'nav;
-            }
-            return Ok(());
-        }
-
+        // Clone KG out of nav so 'menu loop can borrow nav mutably later
+        let kg = nav.last().unwrap().1.as_ref().unwrap().clone();
         knowledge::terminal::render_knowledge_graph(&kg);
 
         // ── Inner loop: node selection (no re-fetch on GitHub return) ─────────
         'menu: loop {
-            // Build flat node list: (choice_string, cluster_name, node_name)
-            let mut node_index: Vec<(String, String)> = Vec::new();
-            let mut choices: Vec<String> = vec!["← 返回".to_string()];
+            // Build choices + a parallel index with the *exact* choice string.
+            // Exact-string lookup (P2 #1 fix): avoids prefix-match ambiguity
+            // (e.g. "Ray" wrongly matching "Ray Serve").
+            let mut node_index: Vec<(String, String, String)> = Vec::new(); // (line, cluster, node)
+            let back_label = if nav.len() > 1 {
+                "← 返回上一層"
+            } else {
+                "← 返回主選單"
+            };
+            let mut choices: Vec<String> = vec![back_label.to_string()];
 
             for cluster in &kg.clusters {
                 let icon = if cluster.name == "GitHub Repos" { "▲" } else { "◆" };
@@ -512,21 +532,15 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
                     let line = if node.description.is_empty() {
                         format!("{} [{}]  {}", icon, cluster.name, node.name)
                     } else {
-                        format!("{} [{}]  {}  — {}", icon, cluster.name, node.name, node.description)
+                        format!(
+                            "{} [{}]  {}  — {}",
+                            icon, cluster.name, node.name, node.description
+                        )
                     };
-                    choices.push(line);
-                    node_index.push((cluster.name.clone(), node.name.clone()));
+                    choices.push(line.clone());
+                    node_index.push((line, cluster.name.clone(), node.name.clone()));
                 }
             }
-
-            let back_label = if nav_stack.len() > 1 {
-                "← 返回上一層"
-            } else {
-                "← 返回主選單"
-            };
-
-            // Replace first choice with correct label
-            choices[0] = back_label.to_string();
 
             let sel = Select::new(
                 &format!("「{}」知識圖譜 — 選擇節點:", current_kw),
@@ -536,29 +550,21 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
             .unwrap_or_else(|_| back_label.to_string());
 
             if sel == back_label {
-                if nav_stack.len() > 1 {
-                    nav_stack.pop();
+                nav.pop();
+                if !nav.is_empty() {
                     separator();
-                    continue 'nav;
+                    continue 'nav; // re-render parent from cache (no fetch)
                 }
                 break 'nav;
             }
 
-            // Find which node was chosen
-            let chosen_offset = node_index
-                .iter()
-                .enumerate()
-                .find(|(_i, (c, n))| {
-                    let icon = if c == "GitHub Repos" { "▲" } else { "◆" };
-                    let base = format!("{} [{}]  {}", icon, c, n);
-                    sel.starts_with(&base)
-                })
-                .map(|(i, _)| i);
-
-            let Some(idx) = chosen_offset else {
+            // Exact match: find by the stored choice line (P2 #1)
+            let Some((_, cluster_name, node_name)) =
+                node_index.iter().find(|(line, _, _)| line == &sel)
+            else {
                 continue 'menu;
             };
-            let (cluster_name, node_name) = node_index[idx].clone();
+            let (cluster_name, node_name) = (cluster_name.clone(), node_name.clone());
 
             separator();
 
@@ -578,22 +584,22 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
             .unwrap_or_else(|_| "← 返回".to_string());
 
             if action.starts_with("←") {
-                continue 'menu; // back to node list, no re-fetch
+                continue 'menu;
             }
 
             separator();
 
             if action.contains("知識圖譜") {
-                nav_stack.push(node_name.clone());
+                nav.push((node_name.clone(), None));
                 continue 'nav;
             }
 
             if action.contains("GitHub Repos") {
                 if let Some(repo) = kg_github_search(&node_name, cfg, llm).await {
-                    nav_stack.push(repo);
+                    nav.push((repo, None));
                     continue 'nav;
                 }
-                continue 'menu; // user went back from GitHub, stay on node list
+                continue 'menu;
             }
         }
     }
