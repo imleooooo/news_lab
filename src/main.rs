@@ -502,9 +502,37 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
 
         // Fetch + build KG only when not yet cached for this level
         if nav.last().unwrap().2.is_none() {
-            let spinner = Spinner::new(&format!("正在抓取技術資料：{}", current_display));
-            let items = fetch_tech_news(&current_search, fetch_n).await;
-            spinner.finish(&format!("取得 {} 筆資料", items.len()));
+            // Adaptive fallback: try progressively shorter queries until we get results.
+            // "{root} {parent} {node}" (3 tokens) → "{root} {node}" (2) → "{node}" (1)
+            let fallback_queries: Vec<String> = {
+                let parts: Vec<&str> = current_search.splitn(3, ' ').collect();
+                match parts.len() {
+                    3 => vec![
+                        current_search.clone(),                       // root parent node
+                        format!("{} {}", parts[0], parts[2]),         // root node
+                        parts[2].to_string(),                         // node only
+                    ],
+                    2 => vec![
+                        current_search.clone(),                       // root node
+                        parts[1].to_string(),                         // node only
+                    ],
+                    _ => vec![current_search.clone()],
+                }
+            };
+
+            let mut items = vec![];
+            let mut used_query = current_search.clone();
+            for q in &fallback_queries {
+                let spinner = Spinner::new(&format!("正在抓取技術資料：{}", current_display));
+                let result = fetch_tech_news(q, fetch_n).await;
+                spinner.finish(&format!("取得 {} 筆資料（查詢：{}）", result.len(), q));
+                if !result.is_empty() {
+                    items = result;
+                    used_query = q.clone();
+                    break;
+                }
+            }
+            let _ = used_query; // informational only
 
             if items.is_empty() {
                 panel("知識圖譜", "找不到足夠的技術資料。", "yellow");
