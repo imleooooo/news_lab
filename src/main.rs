@@ -17,7 +17,7 @@ use fetcher::{
     podcast::fetch_podcast_content,
     tech::{
         expand_news_keywords, fetch_all_rss, fetch_github, fetch_github_emerging,
-        fetch_hackernews_multi, fetch_tech_news,
+        fetch_hackernews_multi, fetch_medium_rss, fetch_tech_news,
     },
 };
 use inquire::{validator::Validation, Select, Text};
@@ -124,9 +124,10 @@ async fn run_news_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()>
     // Step 2: fetch from all sources in parallel using language-appropriate keywords
     let spinner = Spinner::new(&format!("正在抓取新聞：{}", kw));
 
-    let (hn, rss) = tokio::join!(
+    let (hn, rss, medium) = tokio::join!(
         fetch_hackernews_multi(&en_kw, max),
         fetch_all_rss(&en_kw, &zh_kw, max),
+        fetch_medium_rss(&en_kw, max),
     );
 
     // HN: light relevance filter — at least ONE expanded keyword (en_kw) must appear
@@ -150,6 +151,7 @@ async fn run_news_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()>
 
     let mut items: Vec<_> = hn_filtered
         .chain(rss.into_iter().filter(|item| !item.description.trim().is_empty()))
+        .chain(medium.into_iter().filter(|item| !item.description.trim().is_empty()))
         .collect();
 
     // Deduplicate by URL across all sources
@@ -185,6 +187,7 @@ async fn run_news_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()>
         let color = match item.source.as_str() {
             "InfoQ" => "blue",
             "iThome" => "magenta",
+            "Medium" => "green",
             _ => "cyan",
         };
         let title = format!("[{}] {}", i + 1, item.title);

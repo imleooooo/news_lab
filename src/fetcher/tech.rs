@@ -653,3 +653,63 @@ pub async fn fetch_all_rss(en_kw: &[String], zh_kw: &[String], max: usize) -> Ve
     all.sort_by(|a, b| b.published.cmp(&a.published));
     all
 }
+
+// ── Medium tag RSS ─────────────────────────────────────────────────────────────
+
+/// Convert a keyword phrase into a Medium tag slug (lowercase, spaces → hyphens,
+/// non-alphanumeric/hyphen characters removed).
+fn to_medium_slug(kw: &str) -> String {
+    kw.to_lowercase()
+        .chars()
+        .map(|c| if c == ' ' { '-' } else { c })
+        .filter(|c| c.is_alphanumeric() || *c == '-')
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+/// Fetch Medium tag RSS feeds for the first N expanded keywords in parallel.
+/// Medium tag URLs are dynamic (keyword-dependent), so they cannot be in RSS_SOURCES.
+pub async fn fetch_medium_rss(en_kw: &[String], max: usize) -> Vec<NewsItem> {
+    // Take at most 4 keywords to avoid hammering Medium with too many requests.
+    let slugs: Vec<String> = en_kw
+        .iter()
+        .take(4)
+        .map(|k| to_medium_slug(k))
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if slugs.is_empty() {
+        return vec![];
+    }
+
+    let per_slug = ((max / slugs.len()) + 2).min(max);
+    let futures: Vec<_> = slugs
+        .iter()
+        .enumerate()
+        .map(|(i, slug)| {
+            let url = format!("https://medium.com/feed/tag/{}", slug);
+            let kw_clone = en_kw.to_vec();
+            async move {
+                tokio::time::sleep(std::time::Duration::from_millis(i as u64 * 300)).await;
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    fetch_rss_feed(&url, "Medium", &kw_clone, per_slug),
+                )
+                .await
+                .unwrap_or_default()
+            }
+        })
+        .collect();
+
+    let mut seen = std::collections::HashSet::new();
+    let mut all: Vec<NewsItem> = join_all(futures)
+        .await
+        .into_iter()
+        .flatten()
+        .filter(|item| seen.insert(item.url.clone()))
+        .collect();
+
+    all.sort_by(|a, b| b.published.cmp(&a.published));
+    all
+}
