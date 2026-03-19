@@ -190,6 +190,9 @@ fn urlencoding(s: &str) -> String {
 
 /// Search GitHub repos that have the `cncf` topic and match `kw`.
 pub async fn fetch_cncf_by_keyword(kw: &str, max: usize) -> Vec<CNCFProject> {
+    // Same skip list as the TOC flow — excludes CNCF org/meta repos.
+    const SKIP_REPOS: &[&str] = &["toc", "landscape", ".github", "artwork", "foundation", "cncf"];
+
     let token = std::env::var("GITHUB_TOKEN").ok();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -198,32 +201,39 @@ pub async fn fetch_cncf_by_keyword(kw: &str, max: usize) -> Vec<CNCFProject> {
         .unwrap_or_default();
 
     let query = format!("{} topic:cncf", urlencoding(kw));
-    let url = format!(
-        "https://api.github.com/search/repositories?q={}&sort=stars&order=desc&per_page={}",
-        query,
-        max.min(30)
-    );
-    let mut req = client.get(&url);
-    if let Some(ref tok) = token {
-        req = req.header("Authorization", format!("token {}", tok));
-    }
-    let Ok(resp) = req.send().await else {
-        return vec![];
-    };
-    let Ok(result) = resp.json::<SearchResult>().await else {
-        return vec![];
-    };
+    // GitHub Search API allows up to 100 per page; paginate until `max` is reached.
+    let per_page = max.min(100);
+    let mut projects: Vec<CNCFProject> = Vec::with_capacity(max);
+    let mut page = 1u32;
 
-    result
-        .items
-        .into_iter()
-        .take(max)
-        .map(|r| {
+    'pages: loop {
+        let url = format!(
+            "https://api.github.com/search/repositories?q={}&sort=stars&order=desc&per_page={}&page={}",
+            query, per_page, page
+        );
+        let mut req = client.get(&url);
+        if let Some(ref tok) = token {
+            req = req.header("Authorization", format!("token {}", tok));
+        }
+        let Ok(resp) = req.send().await else { break };
+        let Ok(result) = resp.json::<SearchResult>().await else { break };
+        let done = result.items.len() < per_page; // last page
+
+        for r in result.items {
+            // P2: skip CNCF org meta/infrastructure repos
+            let parts: Vec<&str> = r.full_name.splitn(2, '/').collect();
+            if parts.len() == 2 {
+                let (owner, repo) = (parts[0], parts[1]);
+                if owner == "cncf" && SKIP_REPOS.contains(&repo) {
+                    continue;
+                }
+            }
+
             let last_updated = r
                 .pushed_at
                 .as_deref()
                 .and_then(|s| s.parse::<DateTime<Utc>>().ok());
-            CNCFProject {
+            projects.push(CNCFProject {
                 name: r
                     .full_name
                     .split('/')
@@ -238,9 +248,19 @@ pub async fn fetch_cncf_by_keyword(kw: &str, max: usize) -> Vec<CNCFProject> {
                 last_updated,
                 maturity: String::new(), // not available from search API
                 accepted_at: None,
+            });
+            if projects.len() >= max {
+                break 'pages;
             }
-        })
-        .collect()
+        }
+
+        if done {
+            break;
+        }
+        page += 1;
+    }
+
+    projects
 }
 
 // ── Main fetch ─────────────────────────────────────────────────────────────────
