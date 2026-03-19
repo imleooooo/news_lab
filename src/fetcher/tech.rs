@@ -434,20 +434,22 @@ fn parse_rss_items(xml: &str, source: &str, keywords: &[String], max: usize) -> 
     let mut f_desc = String::new();
     let mut f_date = String::new();
 
-    // Build a flat token pool from all keyword phrases (lowercased, len > 2).
-    // An article passes if the full original keyword phrase appears OR
-    // any single token from any keyword appears in combined title+description.
+    // Per-phrase token lists for conjunction matching.
+    // An article passes if any full keyword phrase appears as a substring, OR
+    // the first ≤2 meaningful tokens of any phrase both appear individually.
+    // Using only 2 tokens per phrase avoids over-constraining long phrases
+    // (e.g. "Kubernetes GPU device plugin" → check "kubernetes" + "gpu" only).
     let kw_lower: Vec<String> = keywords.iter().map(|k| k.to_lowercase()).collect();
-    let tokens: Vec<String> = kw_lower
+    let phrase_tokens: Vec<Vec<String>> = kw_lower
         .iter()
-        .flat_map(|k| {
+        .map(|k| {
             k.split_whitespace()
-                .filter(|w| w.len() > 2)
+                .filter(|w| w.len() > 2 && w.starts_with(|c: char| c.is_alphanumeric()))
+                .take(2)
                 .map(|w| w.to_string())
-                .collect::<Vec<_>>()
+                .collect::<Vec<String>>()
         })
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
+        .filter(|v| !v.is_empty())
         .collect();
 
     loop {
@@ -535,7 +537,9 @@ fn parse_rss_items(xml: &str, source: &str, keywords: &[String], max: usize) -> 
                     let desc_lower = f_desc.to_lowercase();
                     let combined = format!("{} {}", title_lower, desc_lower);
                     let matches = kw_lower.iter().any(|k| combined.contains(k.as_str()))
-                        || tokens.iter().any(|t| combined.contains(t.as_str()));
+                        || phrase_tokens.iter().any(|tokens| {
+                            tokens.iter().all(|t| combined.contains(t.as_str()))
+                        });
                     if !matches {
                         buf.clear();
                         continue;
@@ -618,8 +622,7 @@ const RSS_SOURCES: &[(&str, &str, bool)] = &[
 /// Fetch all RSS sources in parallel using language-appropriate keywords.
 /// Each source has an independent 8-second timeout; a slow/failed source does not
 /// affect the others.
-/// Requests are staggered by 1 second each (index × 1 s) to avoid bursting all
-/// sources simultaneously and reduce load on remote servers.
+/// Requests are staggered by 200 ms each to avoid bursting all sources simultaneously.
 pub async fn fetch_all_rss(en_kw: &[String], zh_kw: &[String], max: usize) -> Vec<NewsItem> {
     let per_source = ((max / RSS_SOURCES.len()) + 2).min(max);
     let futures: Vec<_> = RSS_SOURCES
@@ -628,7 +631,7 @@ pub async fn fetch_all_rss(en_kw: &[String], zh_kw: &[String], max: usize) -> Ve
         .map(|(i, (url, source, is_zh))| {
             let kw: &[String] = if *is_zh { zh_kw } else { en_kw };
             async move {
-                tokio::time::sleep(std::time::Duration::from_secs(i as u64)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(i as u64 * 200)).await;
                 tokio::time::timeout(
                     std::time::Duration::from_secs(8),
                     fetch_rss_feed(url, source, kw, per_source),

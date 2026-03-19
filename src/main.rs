@@ -73,7 +73,7 @@ fn show_cached(items: &[cache::DisplayItem], ttl_secs: u64) -> bool {
     let mins = ttl_secs / 60;
     println!(
         "  {} 快取命中（還有 {} 分鐘到期）",
-        style("⚡").yellow().bold(),
+        style("✓").green(),
         mins,
     );
     separator();
@@ -129,11 +129,31 @@ async fn run_news_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()>
         fetch_all_rss(&en_kw, &zh_kw, max),
     );
 
-    let mut items: Vec<_> = hn
-        .into_iter()
-        .filter(|item| !item.url.contains("github.com"))
-        .chain(rss)
-        .filter(|item| !item.description.trim().is_empty())
+    // HN: light relevance filter — ALL tokens of the *original* keyword must appear
+    // in title+description combined.  Algolia already handles query relevance;
+    // this only removes clearly off-topic results (e.g. "AI telecom" for "GPU Infra").
+    // HN link posts (empty story_text) are intentionally kept — show title + URL.
+    let orig_tokens: Vec<String> = kw
+        .split_whitespace()
+        .filter(|w| w.len() > 1)
+        .map(|w| w.to_lowercase())
+        .collect();
+    let hn_filtered = hn.into_iter().filter(|item| !item.url.contains("github.com")).filter(
+        |item| {
+            if orig_tokens.is_empty() {
+                return true;
+            }
+            let combined = format!(
+                "{} {}",
+                item.title.to_lowercase(),
+                item.description.to_lowercase()
+            );
+            orig_tokens.iter().all(|t| combined.contains(t.as_str()))
+        },
+    );
+
+    let mut items: Vec<_> = hn_filtered
+        .chain(rss.into_iter().filter(|item| !item.description.trim().is_empty()))
         .collect();
 
     // Deduplicate by URL across all sources
@@ -878,6 +898,15 @@ async fn main() -> Result<()> {
         })
         .init();
 
+    if std::env::var("OPENAI_API_KEY").is_err() {
+        eprintln!(
+            "\n  {} 請設定 OPENAI_API_KEY 環境變數，或在 {} 加入 OPENAI_API_KEY=sk-...",
+            style("✗").red().bold(),
+            style(".env").cyan(),
+        );
+        std::process::exit(1);
+    }
+
     print_banner();
 
     let mut cfg = configure()?;
@@ -930,6 +959,7 @@ async fn main() -> Result<()> {
                 "技術生態雷達和競品分析 (請使用如 AI on K8s 去提問)".to_string(),
                 "其他功能 ▶".to_string(),
                 format!("調整筆數 (目前: {})", cfg.max_results),
+                "清空快取".to_string(),
                 "更換關鍵字".to_string(),
                 "離開".to_string(),
             ];
@@ -971,6 +1001,16 @@ async fn main() -> Result<()> {
                             style(n).cyan()
                         );
                     }
+                    separator();
+                    continue 'feat;
+                }
+                f if f.contains("清空快取") => {
+                    let n = cache::clear_all();
+                    println!(
+                        "  {} 已清除 {} 筆快取",
+                        style("✓").green(),
+                        style(n).cyan()
+                    );
                     separator();
                     continue 'feat;
                 }

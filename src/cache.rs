@@ -71,6 +71,23 @@ pub fn get(parts: &[&str]) -> Option<(Vec<DisplayItem>, u64)> {
     Some((entry.items, TTL_SECS - age))
 }
 
+/// Delete all cached `.json` entries. Returns the number of files removed.
+pub fn clear_all() -> usize {
+    let dir = cache_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        if entry.path().extension().and_then(|e| e.to_str()) == Some("json")
+            && std::fs::remove_file(entry.path()).is_ok()
+        {
+            count += 1;
+        }
+    }
+    count
+}
+
 /// Write items to cache (silently ignores write errors).
 pub fn put(parts: &[&str], items: &[DisplayItem]) {
     let dir = cache_dir();
