@@ -5,7 +5,7 @@ set -e
 
 APP_NAME="News Lab"
 BINARY_NAME="news_lab"
-VERSION="0.1.5"
+VERSION="0.1.6"
 IDENTIFIER="com.news_lab"
 PKG_NAME="${APP_NAME}-${VERSION}.pkg"
 
