@@ -64,12 +64,14 @@ BIN="$DIR/news_lab"
 ENV_FILE="$DIR/../Resources/.env"
 PIDFILE="/tmp/com.news_lab.pid"
 
-# Kill only the specific stale instance we previously launched (by saved PID),
-# not every process named news_lab on the system.
+# Kill only our own stale instance — confirm the PID still belongs to news_lab
+# before sending the signal, guarding against PID reuse by unrelated processes.
 if [ -f "$PIDFILE" ]; then
     OLD_PID=$(cat "$PIDFILE")
-    kill "$OLD_PID" 2>/dev/null || true
-    sleep 0.5
+    if ps -p "$OLD_PID" -o comm= 2>/dev/null | grep -qx "news_lab"; then
+        kill "$OLD_PID" 2>/dev/null || true
+        sleep 0.5
+    fi
     rm -f "$PIDFILE"
 fi
 
@@ -78,11 +80,20 @@ fi
 # PID correctly identifies the news_lab process we own.
 osascript -e "tell application \"Terminal\" to do script \"set -a; [ -f '$ENV_FILE' ] && source '$ENV_FILE'; set +a; echo \$\$ > '$PIDFILE'; exec '$BIN'\""
 
-# Keep launcher alive so Dock icon stays visible until news_lab exits
-sleep 3
-while pgrep -x news_lab > /dev/null 2>&1; do
+# Wait up to 10 s for our launched instance to write its PID
+OUR_PID=""
+for _i in $(seq 10); do
     sleep 1
+    [ -f "$PIDFILE" ] && { OUR_PID=$(cat "$PIDFILE"); break; }
 done
+
+# Keep launcher alive until our specific news_lab instance exits,
+# not any unrelated news_lab process that may be running elsewhere.
+if [ -n "$OUR_PID" ]; then
+    while kill -0 "$OUR_PID" 2>/dev/null; do
+        sleep 1
+    done
+fi
 rm -f "$PIDFILE"
 LAUNCHER
 chmod +x "$MACOS/launcher"
