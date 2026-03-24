@@ -76,8 +76,8 @@ cat > "$CONTENTS/Info.plist" << PLIST
   <key>CFBundleIdentifier</key>   <string>com.news_lab</string>
   <key>CFBundleName</key>         <string>$APP_NAME</string>
   <key>CFBundleDisplayName</key>  <string>$APP_NAME</string>
-  <key>CFBundleVersion</key>      <string>0.1.6</string>
-  <key>CFBundleShortVersionString</key> <string>0.1.6</string>
+  <key>CFBundleVersion</key>      <string>0.1.7</string>
+  <key>CFBundleShortVersionString</key> <string>0.1.7</string>
   <key>CFBundlePackageType</key>  <string>APPL</string>
   <key>CFBundleIconFile</key>     <string>icon</string>
 </dict>
