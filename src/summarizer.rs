@@ -1,5 +1,6 @@
 use crate::fetcher::{
-    arxiv::ArxivPaper, cncf::CNCFProject, huggingface::HFModel, podcast::PodcastEpisode, NewsItem,
+    arxiv::ArxivPaper, cncf::CNCFProject, huggingface::HFModel, podcast::PodcastEpisode,
+    release::ReleaseItem, NewsItem,
 };
 use crate::llm::LLMClient;
 use crate::radar::Blip;
@@ -170,6 +171,30 @@ pub async fn summarize_podcast(ep: &PodcastEpisode, kw: &str, llm: &LLMClient) -
         .replace("{title}", &ep.title)
         .replace("{duration}", &ep.duration)
         .replace("{description}", &ep.description);
+
+    llm.invoke(&prompt)
+        .await
+        .unwrap_or_else(|e| format!("摘要生成失敗: {}", e))
+}
+
+pub async fn summarize_release(item: &ReleaseItem, repo: &str, llm: &LLMClient) -> String {
+    let date_str = item
+        .published
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "未知".to_string());
+
+    let body_trimmed = if item.body.trim().is_empty() {
+        "（無詳細 Release Notes）".to_string()
+    } else {
+        item.body.clone()
+    };
+
+    let prompt = decode(enc::RELEASE)
+        .replace("{repo}", repo)
+        .replace("{tag}", &item.tag_name)
+        .replace("{name}", &item.name)
+        .replace("{date}", &date_str)
+        .replace("{body}", &body_trimmed);
 
     llm.invoke(&prompt)
         .await

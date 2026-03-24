@@ -142,6 +142,28 @@ Stars：{stars}
 
     write_enc(
         &mut f,
+        "RELEASE",
+        r#"你是一位開源專案技術分析師，專門解讀 GitHub Release Notes。
+請針對以下版本更新提供簡潔的中文摘要（2-4句話），包含：
+1. 本次版本的核心變更或新功能
+2. 破壞性變更（Breaking Changes）或升級注意事項（若有）
+3. 對使用者最重要的影響
+
+專案：{repo}
+版本號：{tag}
+版本名稱：{name}
+發布日期：{date}
+Release Notes：
+{body}
+
+⚠️ 重要：
+- 若 Release Notes 為空或極短，請根據版本號推測可能的更新類型（例如安全修補、功能迭代）。
+- 請直接摘要，不要重複輸出版本號或日期。
+請用繁體中文回答，保持專業且易於理解。"#,
+    );
+
+    write_enc(
+        &mut f,
         "COMPETITOR_JSON",
         r#"你是一位技術分析師。針對「{name}」，列出 4–6 個競品（含「{name}」本身，放第一列）。
 關鍵字領域：{keyword}

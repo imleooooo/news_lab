@@ -15,6 +15,7 @@ use fetcher::{
     cncf::{fetch_cncf_by_keyword, fetch_cncf_projects},
     huggingface::{fetch_hf_models, fmt_num, HFSort},
     podcast::fetch_podcast_content,
+    release::{fetch_repo_releases, normalise_repo},
     tech::{
         expand_news_keywords, fetch_all_rss, fetch_github, fetch_github_emerging,
         fetch_hackernews_multi, fetch_medium_rss, fetch_tech_news,
@@ -25,7 +26,7 @@ use llm::LLMClient;
 use radar::{check_oss_activity, extract_blips, review_and_augment, terminal as radar_terminal};
 use summarizer::{
     analyze_competition, summarize_arxiv, summarize_cncf_project, summarize_hf_model,
-    summarize_one, summarize_podcast, CompetitorRow,
+    summarize_one, summarize_podcast, summarize_release, CompetitorRow,
 };
 use ui::{panel, print_url, separator, Spinner};
 
@@ -1143,6 +1144,102 @@ async fn run_cncf_summary(cfg: &Config, llm: &LLMClient) -> Result<()> {
     Ok(())
 }
 
+// ── Run: Repo Release Summary ─────────────────────────────────────────────────
+
+async fn run_repo_releases(llm: &LLMClient) -> Result<()> {
+    let input = Text::new("輸入 GitHub Repo (e.g. kubernetes/kubernetes):")
+        .prompt()
+        .unwrap_or_default();
+    let input = input.trim();
+    if input.is_empty() {
+        panel("版本更新摘要", "請輸入 repo 名稱。", "yellow");
+        return Ok(());
+    }
+
+    let repo = normalise_repo(input);
+    separator();
+
+    let spinner = Spinner::new(&format!("正在抓取 {} 的 Release 清單...", repo));
+    let releases = fetch_repo_releases(&repo).await;
+    let total = releases.minor_releases.len() + releases.major_release.is_some() as usize;
+    spinner.finish(&format!(
+        "找到 {} 個小版本、{} 個大版本",
+        releases.minor_releases.len(),
+        releases.major_release.is_some() as usize
+    ));
+
+    if total == 0 {
+        panel(
+            "版本更新摘要",
+            &format!("找不到 {} 的 Release 資料。請確認 repo 名稱是否正確，或設定 GITHUB_TOKEN 以避免 API 限速。", repo),
+            "yellow",
+        );
+        return Ok(());
+    }
+
+    // ── Minor / patch releases ─────────────────────────────────────────────
+    if !releases.minor_releases.is_empty() {
+        println!(
+            "\n  {}",
+            style(format!("最新 {} 個小版本更新", releases.minor_releases.len()))
+                .cyan()
+                .bold()
+        );
+        println!("  {}", style("─".repeat(72)).cyan().dim());
+
+        for (i, item) in releases.minor_releases.iter().enumerate() {
+            let spinner = Spinner::new(&format!(
+                "摘要小版本 {}/{}: {}...",
+                i + 1,
+                releases.minor_releases.len(),
+                item.tag_name
+            ));
+            let summary = summarize_release(item, &repo, llm).await;
+            spinner.finish("");
+
+            let date_str = item
+                .published
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "未知".to_string());
+
+            let content = format!("版本: {} | 發布: {}\n\n{}", item.tag_name, date_str, summary);
+            panel(&format!("[小版本 {}] {}", i + 1, item.name), &content, "cyan");
+            print_url(&item.url);
+            separator();
+        }
+    }
+
+    // ── Latest major release ───────────────────────────────────────────────
+    if let Some(ref major) = releases.major_release {
+        println!(
+            "\n  {}",
+            style("最新大版本更新").yellow().bold()
+        );
+        println!("  {}", style("─".repeat(72)).yellow().dim());
+
+        let spinner = Spinner::new(&format!("摘要大版本: {}...", major.tag_name));
+        let summary = summarize_release(major, &repo, llm).await;
+        spinner.finish("");
+
+        let date_str = major
+            .published
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "未知".to_string());
+
+        let content = format!("版本: {} | 發布: {}\n\n{}", major.tag_name, date_str, summary);
+        panel(&format!("[大版本] {}", major.name), &content, "yellow");
+        print_url(&major.url);
+        separator();
+    } else {
+        println!(
+            "\n  {}",
+            style("（找不到大版本 vX.0.0 格式的 Release）").dim()
+        );
+    }
+
+    Ok(())
+}
+
 // ── Run: Extras sub-menu ───────────────────────────────────────────────────────
 
 async fn run_extras(cfg: &Config, llm: &LLMClient) -> Result<()> {
@@ -1152,6 +1249,7 @@ async fn run_extras(cfg: &Config, llm: &LLMClient) -> Result<()> {
             vec![
                 "HuggingFace 模型整理  — 前 20 名熱門模型摘要",
                 "CNCF 專案整理        — 最近值得關注的 CNCF 專案",
+                "Repo 版本更新摘要    — 指定 Repo 最新版本更新摘要",
                 "← 返回主選單",
             ],
         )
@@ -1166,6 +1264,8 @@ async fn run_extras(cfg: &Config, llm: &LLMClient) -> Result<()> {
 
         let result = if sel.contains("HuggingFace") {
             run_hf_summary(llm).await
+        } else if sel.contains("Repo 版本") {
+            run_repo_releases(llm).await
         } else {
             run_cncf_summary(cfg, llm).await
         };

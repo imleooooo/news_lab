@@ -2,6 +2,7 @@ pub mod arxiv;
 pub mod cncf;
 pub mod huggingface;
 pub mod podcast;
+pub mod release;
 pub mod tech;
 
 use chrono::{DateTime, Utc};
