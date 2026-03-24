@@ -189,6 +189,17 @@ mod tests {
     }
 
     #[test]
+    fn sub_component_tags_have_slash() {
+        // These monorepo sub-project tags should be detectable by the '/' they contain.
+        assert!("helm-chart/1.20.0".contains('/'));
+        assert!("airflow-ctl/0.1.3".contains('/'));
+        assert!("providers/apache-beam/1.0.0".contains('/'));
+        // Main-project tags must not contain '/'.
+        assert!(!"2.10.4".contains('/'));
+        assert!(!"v3.0.0".contains('/'));
+    }
+
+    #[test]
     fn major_release_detection() {
         assert!(is_major_release("v2.0.0"));
         assert!(is_major_release("v3.0"));
@@ -221,7 +232,7 @@ pub async fn fetch_repo_releases(repo: &str) -> RepoReleases {
         let is_last = raw.len() < 50;
 
         for r in raw {
-            if r.draft || r.prerelease {
+            if r.draft || r.prerelease || r.tag_name.contains('/') {
                 continue;
             }
             let item = to_release_item(r);
