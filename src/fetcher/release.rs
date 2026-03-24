@@ -69,6 +69,22 @@ fn to_release_item(r: GHRelease) -> ReleaseItem {
     }
 }
 
+/// Examine a page of candidate releases (pre-draft/prerelease already filtered out)
+/// and decide whether to restrict to non-slash tags.
+///
+/// Returns `true` when both slash and non-slash tags are present — that signals a
+/// monorepo where slash-prefixed tags belong to sub-components (e.g. apache/airflow's
+/// `helm-chart/1.20.0`). In that case the caller should ignore slash tags so only the
+/// primary project's releases appear.
+///
+/// Returns `false` when *all* tags use slashes, which means the project itself uses
+/// that convention (e.g. `release/1.2.3`) and filtering would leave nothing.
+fn prefer_non_slash(candidates: &[&GHRelease]) -> bool {
+    let has_non_slash = candidates.iter().any(|r| !r.tag_name.contains('/'));
+    let has_slash = candidates.iter().any(|r| r.tag_name.contains('/'));
+    has_non_slash && has_slash
+}
+
 pub struct RepoReleases {
     /// Latest 5 non-major (minor / patch) releases, newest first.
     pub minor_releases: Vec<ReleaseItem>,
@@ -135,9 +151,124 @@ async fn fetch_page(
     }
 }
 
+pub async fn fetch_repo_releases(repo: &str) -> RepoReleases {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .user_agent("news-lab/1.0")
+        .build()
+        .unwrap_or_default();
+
+    let auth = std::env::var("GITHUB_TOKEN")
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+
+    // Fetch page 1 first so we can decide the tag-filter strategy before collecting
+    // any results. Strategy is fixed for the rest of the pagination run.
+    let first_page = fetch_page(&client, repo, 1, &auth).await;
+    let candidates: Vec<&GHRelease> = first_page
+        .iter()
+        .filter(|r| !r.draft && !r.prerelease)
+        .collect();
+    let skip_slash = prefer_non_slash(&candidates);
+
+    let mut minor_releases: Vec<ReleaseItem> = Vec::new();
+    let mut major_release: Option<ReleaseItem> = None;
+
+    // Helper: ingest one page's worth of raw releases into the accumulators.
+    macro_rules! ingest {
+        ($raw:expr) => {
+            for r in $raw {
+                if r.draft || r.prerelease {
+                    continue;
+                }
+                if skip_slash && r.tag_name.contains('/') {
+                    continue;
+                }
+                let item = to_release_item(r);
+                if item.is_major {
+                    if major_release.is_none() {
+                        major_release = Some(item);
+                    }
+                } else if minor_releases.len() < 5 {
+                    minor_releases.push(item);
+                }
+            }
+        };
+    }
+
+    let first_is_last = first_page.len() < 50;
+    ingest!(first_page);
+
+    if !first_is_last {
+        // Page through releases (newest first) until both goals are met or pages run out.
+        // Cap at 10 pages (500 releases) to avoid runaway pagination.
+        for page in 2u32..=10 {
+            if minor_releases.len() >= 5 && major_release.is_some() {
+                break;
+            }
+            let raw = fetch_page(&client, repo, page, &auth).await;
+            let is_last = raw.len() < 50;
+            ingest!(raw);
+            if is_last {
+                break;
+            }
+        }
+    }
+
+    RepoReleases {
+        minor_releases,
+        major_release,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_release(tag: &str) -> GHRelease {
+        GHRelease {
+            tag_name: tag.to_string(),
+            name: String::new(),
+            body: String::new(),
+            html_url: String::new(),
+            published_at: None,
+            prerelease: false,
+            draft: false,
+        }
+    }
+
+    // ── prefer_non_slash ──────────────────────────────────────────────────────
+
+    #[test]
+    fn mixed_tags_prefer_non_slash() {
+        let releases = vec![
+            make_release("helm-chart/1.20.0"),
+            make_release("airflow-ctl/0.1.3"),
+            make_release("2.10.4"),
+        ];
+        let refs: Vec<&GHRelease> = releases.iter().collect();
+        assert!(prefer_non_slash(&refs));
+    }
+
+    #[test]
+    fn all_slash_tags_do_not_filter() {
+        let releases = vec![
+            make_release("release/1.2.3"),
+            make_release("release/1.2.2"),
+        ];
+        let refs: Vec<&GHRelease> = releases.iter().collect();
+        assert!(!prefer_non_slash(&refs));
+    }
+
+    #[test]
+    fn all_non_slash_tags_do_not_filter() {
+        let releases = vec![make_release("v1.2.3"), make_release("v1.2.2")];
+        let refs: Vec<&GHRelease> = releases.iter().collect();
+        assert!(!prefer_non_slash(&refs));
+    }
+
+    // ── normalise_repo ────────────────────────────────────────────────────────
 
     #[test]
     fn normalise_bare() {
@@ -188,16 +319,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sub_component_tags_have_slash() {
-        // These monorepo sub-project tags should be detectable by the '/' they contain.
-        assert!("helm-chart/1.20.0".contains('/'));
-        assert!("airflow-ctl/0.1.3".contains('/'));
-        assert!("providers/apache-beam/1.0.0".contains('/'));
-        // Main-project tags must not contain '/'.
-        assert!(!"2.10.4".contains('/'));
-        assert!(!"v3.0.0".contains('/'));
-    }
+    // ── major release detection ───────────────────────────────────────────────
 
     #[test]
     fn major_release_detection() {
@@ -206,61 +328,5 @@ mod tests {
         assert!(!is_major_release("v1.2.0"));
         assert!(!is_major_release("v1.0.1"));
         assert!(!is_major_release("v1.2.3"));
-    }
-}
-
-pub async fn fetch_repo_releases(repo: &str) -> RepoReleases {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .user_agent("news-lab/1.0")
-        .build()
-        .unwrap_or_default();
-
-    let auth = std::env::var("GITHUB_TOKEN")
-        .ok()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty());
-
-    let mut minor_releases: Vec<ReleaseItem> = Vec::new();
-    let mut major_release: Option<ReleaseItem> = None;
-
-    // Page through releases (newest first). Collect the first 5 non-major releases
-    // from whichever page they appear on, and keep paginating until a major release
-    // is found or we exhaust all pages (cap at 10 pages = 500 releases).
-    'pages: for page in 1u32..=10 {
-        let raw = fetch_page(&client, repo, page, &auth).await;
-        let is_last = raw.len() < 50;
-
-        for r in raw {
-            if r.draft || r.prerelease || r.tag_name.contains('/') {
-                continue;
-            }
-            let item = to_release_item(r);
-            if item.is_major {
-                if major_release.is_none() {
-                    major_release = Some(item);
-                }
-                // Both goals satisfied — no need to fetch further pages.
-                if minor_releases.len() >= 5 {
-                    break 'pages;
-                }
-            } else if minor_releases.len() < 5 {
-                minor_releases.push(item);
-            }
-        }
-
-        if is_last {
-            break;
-        }
-
-        // If we already have both 5 minor releases and a major release, stop early.
-        if minor_releases.len() >= 5 && major_release.is_some() {
-            break;
-        }
-    }
-
-    RepoReleases {
-        minor_releases,
-        major_release,
     }
 }
