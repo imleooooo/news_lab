@@ -214,7 +214,8 @@ pub async fn fetch_doc_page(url: &str) -> Option<DocPage> {
                     break;
                 }
             }
-            _ => break, // end of body or network error — process what we have
+            Ok(None) => break,    // clean end of body — process what we have
+            Err(_) => return None, // stream error — fail rather than summarize partial content
         }
     }
 
