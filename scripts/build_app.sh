@@ -57,15 +57,28 @@ cat > "$MACOS/launcher" << 'LAUNCHER'
 DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN="$DIR/news_lab"
 ENV_FILE="$DIR/../Resources/.env"
-# Kill any stale news_lab from a previous session that didn't exit cleanly
-pkill -x news_lab 2>/dev/null || true
-sleep 0.5
-osascript -e "tell application \"Terminal\" to do script \"set -a; [ -f '$ENV_FILE' ] && source '$ENV_FILE'; set +a; '$BIN'; exit 0\""
+PIDFILE="/tmp/com.news_lab.pid"
+
+# Kill only the specific stale instance we previously launched (by saved PID),
+# not every process named news_lab on the system.
+if [ -f "$PIDFILE" ]; then
+    OLD_PID=$(cat "$PIDFILE")
+    kill "$OLD_PID" 2>/dev/null || true
+    sleep 0.5
+    rm -f "$PIDFILE"
+fi
+
+# The Terminal shell writes its own PID before exec'ing into news_lab.
+# exec replaces the shell with news_lab at the same PID, so the saved
+# PID correctly identifies the news_lab process we own.
+osascript -e "tell application \"Terminal\" to do script \"set -a; [ -f '$ENV_FILE' ] && source '$ENV_FILE'; set +a; echo \$\$ > '$PIDFILE'; exec '$BIN'\""
+
 # Keep launcher alive so Dock icon stays visible until news_lab exits
 sleep 3
 while pgrep -x news_lab > /dev/null 2>&1; do
     sleep 1
 done
+rm -f "$PIDFILE"
 LAUNCHER
 chmod +x "$MACOS/launcher"
 
