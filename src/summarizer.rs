@@ -1,6 +1,6 @@
 use crate::fetcher::{
-    arxiv::ArxivPaper, cncf::CNCFProject, huggingface::HFModel, podcast::PodcastEpisode,
-    release::ReleaseItem, NewsItem,
+    arxiv::ArxivPaper, cncf::CNCFProject, docs::DocPage, huggingface::HFModel,
+    podcast::PodcastEpisode, release::ReleaseItem, NewsItem,
 };
 use crate::llm::LLMClient;
 use crate::radar::Blip;
@@ -173,6 +173,35 @@ pub async fn summarize_podcast(ep: &PodcastEpisode, kw: &str, llm: &LLMClient) -
         .replace("{description}", &ep.description);
 
     llm.invoke(&prompt)
+        .await
+        .unwrap_or_else(|e| format!("摘要生成失敗: {}", e))
+}
+
+pub async fn summarize_docs(page: &DocPage, llm: &LLMClient) -> String {
+    let content = if page.text.trim().is_empty() {
+        "（無法擷取文件內容，請根據 URL 和標題推測）".to_string()
+    } else {
+        page.text.clone()
+    };
+
+    let nav = if page.nav_links.is_empty() {
+        "（未發現站內連結）".to_string()
+    } else {
+        page.nav_links
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let prompt = decode(enc::DOCS)
+        .replace("{url}", &page.url)
+        .replace("{title}", &page.title)
+        .replace("{nav_links}", &nav)
+        .replace("{content}", &content);
+
+    llm.invoke_with_limit(&prompt, 2048)
         .await
         .unwrap_or_else(|e| format!("摘要生成失敗: {}", e))
 }

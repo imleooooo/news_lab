@@ -1,5 +1,6 @@
 pub mod arxiv;
 pub mod cncf;
+pub mod docs;
 pub mod huggingface;
 pub mod podcast;
 pub mod release;

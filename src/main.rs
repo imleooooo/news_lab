@@ -13,6 +13,7 @@ use console::style;
 use fetcher::{
     arxiv::fetch_domain_papers,
     cncf::{fetch_cncf_by_keyword, fetch_cncf_projects},
+    docs::fetch_doc_page,
     huggingface::{fetch_hf_models, fmt_num, HFSort},
     podcast::fetch_podcast_content,
     release::{fetch_repo_releases, normalise_repo},
@@ -25,8 +26,8 @@ use inquire::{validator::Validation, Select, Text};
 use llm::LLMClient;
 use radar::{check_oss_activity, extract_blips, review_and_augment, terminal as radar_terminal};
 use summarizer::{
-    analyze_competition, summarize_arxiv, summarize_cncf_project, summarize_hf_model,
-    summarize_one, summarize_podcast, summarize_release, CompetitorRow,
+    analyze_competition, summarize_arxiv, summarize_cncf_project, summarize_docs,
+    summarize_hf_model, summarize_one, summarize_podcast, summarize_release, CompetitorRow,
 };
 use ui::{panel, print_url, separator, Spinner};
 
@@ -1144,6 +1145,77 @@ async fn run_cncf_summary(cfg: &Config, llm: &LLMClient) -> Result<()> {
     Ok(())
 }
 
+// ── Run: Technical Documentation Summary ──────────────────────────────────────
+
+async fn run_docs_summary(llm: &LLMClient) -> Result<()> {
+    loop {
+        let input = Text::new("輸入文件 URL (Enter 離開):")
+            .prompt()
+            .unwrap_or_default();
+        let url = input.trim().to_string();
+
+        if url.is_empty() {
+            break;
+        }
+
+        // Basic URL sanity check
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            panel("技術文件摘要", "請輸入完整 URL（以 https:// 開頭）。", "yellow");
+            continue;
+        }
+
+        separator();
+
+        let spinner = Spinner::new(&format!("正在抓取文件頁面: {}", url));
+        let page = fetch_doc_page(&url).await;
+        spinner.finish(match &page {
+            Some(p) if !p.text.is_empty() => "頁面抓取完成",
+            Some(_) => "頁面抓取完成（內容可能為空，SPA 頁面需直接開啟）",
+            None => "無法取得頁面",
+        });
+
+        let page = match page {
+            Some(p) => p,
+            None => {
+                panel(
+                    "技術文件摘要",
+                    &format!("無法抓取頁面，請確認 URL 是否正確且可公開存取：\n{}", url),
+                    "yellow",
+                );
+                separator();
+                continue;
+            }
+        };
+
+        let spinner = Spinner::new("LLM 分析文件內容...");
+        let summary = summarize_docs(&page, llm).await;
+        spinner.finish("");
+
+        let title_display = if page.title.is_empty() {
+            url.clone()
+        } else {
+            page.title.clone()
+        };
+
+        // Show link count as a hint at the bottom of the content
+        let link_hint = if page.nav_links.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n站內發現 {} 個連結", page.nav_links.len())
+        };
+
+        panel(
+            &format!("技術文件摘要 — {}", title_display),
+            &format!("{}{}", summary, link_hint),
+            "cyan",
+        );
+        print_url(&url);
+        separator();
+    }
+
+    Ok(())
+}
+
 // ── Run: Repo Release Summary ─────────────────────────────────────────────────
 
 async fn run_repo_releases(llm: &LLMClient) -> Result<()> {
@@ -1250,6 +1322,7 @@ async fn run_extras(cfg: &Config, llm: &LLMClient) -> Result<()> {
                 "HuggingFace 模型整理  — 前 20 名熱門模型摘要",
                 "CNCF 專案整理        — 最近值得關注的 CNCF 專案",
                 "Repo 版本更新摘要    — 指定 Repo 最新版本更新摘要",
+                "技術文件摘要        — 輸入文件 URL，整理涵蓋的主要內容",
                 "← 返回主選單",
             ],
         )
@@ -1266,6 +1339,8 @@ async fn run_extras(cfg: &Config, llm: &LLMClient) -> Result<()> {
             run_hf_summary(llm).await
         } else if sel.contains("Repo 版本") {
             run_repo_releases(llm).await
+        } else if sel.contains("技術文件") {
+            run_docs_summary(llm).await
         } else {
             run_cncf_summary(cfg, llm).await
         };
