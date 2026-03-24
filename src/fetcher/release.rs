@@ -107,6 +107,9 @@ pub struct RepoReleases {
     pub minor_releases: Vec<ReleaseItem>,
     /// Latest major release (vX.0.0), if any exists.
     pub major_release: Option<ReleaseItem>,
+    /// Set when the GitHub API returned a non-2xx response (e.g. 403 rate-limit,
+    /// 404 unknown repo). `minor_releases` and `major_release` will be empty.
+    pub fetch_error: Option<String>,
 }
 
 /// Normalise a user-supplied repo string to "owner/repo".
@@ -146,14 +149,19 @@ pub fn normalise_repo(input: &str) -> String {
     format!("{}/{}", owner, repo)
 }
 
-/// Fetch one page of releases; returns an empty vec on any error or when the
-/// page is beyond the last one.
+/// Fetch one page of releases.
+///
+/// Returns:
+/// - `Ok(releases)` — HTTP 2xx; `releases` may be empty on the last page.
+/// - `Err(msg)`     — non-2xx (e.g. 403 rate-limit, 404 unknown repo) or
+///                    network failure; the caller should stop paginating and
+///                    surface `msg` to the user.
 async fn fetch_page(
     client: &reqwest::Client,
     repo: &str,
     page: u32,
     auth: &Option<String>,
-) -> Vec<GHRelease> {
+) -> Result<Vec<GHRelease>, String> {
     let url = format!(
         "https://api.github.com/repos/{}/releases?per_page=50&page={}",
         repo, page
@@ -162,10 +170,22 @@ async fn fetch_page(
     if let Some(token) = auth {
         req = req.header("Authorization", format!("Bearer {}", token));
     }
-    match req.send().await {
-        Ok(resp) => resp.json::<Vec<GHRelease>>().await.unwrap_or_default(),
-        Err(_) => vec![],
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => return Err(format!("網路錯誤: {}", e)),
+    };
+    let status = resp.status();
+    if !status.is_success() {
+        let hint = if status.as_u16() == 403 {
+            "（API 速率限制，請設定 GITHUB_TOKEN 環境變數）"
+        } else if status.as_u16() == 404 {
+            "（找不到此 Repo，請確認名稱是否正確）"
+        } else {
+            ""
+        };
+        return Err(format!("GitHub API 回傳 {}{}", status.as_u16(), hint));
     }
+    Ok(resp.json::<Vec<GHRelease>>().await.unwrap_or_default())
 }
 
 pub async fn fetch_repo_releases(repo: &str) -> RepoReleases {
@@ -192,9 +212,16 @@ pub async fn fetch_repo_releases(repo: &str) -> RepoReleases {
     // the buffer already contains enough items of the right type; we cap at 10
     // pages (500 releases) regardless.
     let mut buffer: Vec<ReleaseItem> = Vec::new();
+    let mut fetch_error: Option<String> = None;
 
-    for page in 1u32..=10 {
-        let raw = fetch_page(&client, repo, page, &auth).await;
+    'pages: for page in 1u32..=10 {
+        let raw = match fetch_page(&client, repo, page, &auth).await {
+            Ok(v) => v,
+            Err(msg) => {
+                fetch_error = Some(msg);
+                break 'pages;
+            }
+        };
         let is_last = raw.len() < 50;
 
         // Convert and truncate immediately; the raw Vec is dropped at end of block.
@@ -212,6 +239,17 @@ pub async fn fetch_repo_releases(repo: &str) -> RepoReleases {
 
         if is_last {
             break;
+        }
+    }
+
+    // If the API errored on the very first page, return early with the error.
+    if buffer.is_empty() {
+        if let Some(ref err) = fetch_error {
+            return RepoReleases {
+                minor_releases: vec![],
+                major_release: None,
+                fetch_error: Some(err.clone()),
+            };
         }
     }
 
@@ -237,6 +275,7 @@ pub async fn fetch_repo_releases(repo: &str) -> RepoReleases {
     RepoReleases {
         minor_releases,
         major_release,
+        fetch_error,
     }
 }
 

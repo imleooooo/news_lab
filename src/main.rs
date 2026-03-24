@@ -1233,6 +1233,13 @@ async fn run_repo_releases(llm: &LLMClient) -> Result<()> {
 
     let spinner = Spinner::new(&format!("正在抓取 {} 的 Release 清單...", repo));
     let releases = fetch_repo_releases(&repo).await;
+
+    if let Some(ref err) = releases.fetch_error {
+        spinner.finish("抓取失敗");
+        panel("版本更新摘要", err, "red");
+        return Ok(());
+    }
+
     let total = releases.minor_releases.len() + releases.major_release.is_some() as usize;
     spinner.finish(&format!(
         "找到 {} 個小版本、{} 個大版本",
@@ -1243,7 +1250,7 @@ async fn run_repo_releases(llm: &LLMClient) -> Result<()> {
     if total == 0 {
         panel(
             "版本更新摘要",
-            &format!("找不到 {} 的 Release 資料。請確認 repo 名稱是否正確，或設定 GITHUB_TOKEN 以避免 API 限速。", repo),
+            &format!("找不到 {} 的 Release 資料。\n此 Repo 可能未使用 GitHub Releases 功能，或所有版本均為 Prerelease。", repo),
             "yellow",
         );
         return Ok(());
