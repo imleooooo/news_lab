@@ -1234,18 +1234,33 @@ async fn run_repo_releases(llm: &LLMClient) -> Result<()> {
     let spinner = Spinner::new(&format!("正在抓取 {} 的 Release 清單...", repo));
     let releases = fetch_repo_releases(&repo).await;
 
-    if let Some(ref err) = releases.fetch_error {
-        spinner.finish("抓取失敗");
-        panel("版本更新摘要", err, "red");
-        return Ok(());
-    }
-
     let total = releases.minor_releases.len() + releases.major_release.is_some() as usize;
-    spinner.finish(&format!(
-        "找到 {} 個小版本、{} 個大版本",
-        releases.minor_releases.len(),
-        releases.major_release.is_some() as usize
-    ));
+
+    // Hard-fail only when the API error left us with nothing to show.
+    // If earlier pages were fetched successfully, show those results with a warning.
+    if let Some(ref err) = releases.fetch_error {
+        if total == 0 {
+            spinner.finish("抓取失敗");
+            panel("版本更新摘要", err, "red");
+            return Ok(());
+        }
+        spinner.finish(&format!(
+            "找到 {} 個小版本、{} 個大版本（分頁中斷）",
+            releases.minor_releases.len(),
+            releases.major_release.is_some() as usize
+        ));
+        println!(
+            "  {} {}",
+            style("⚠").yellow(),
+            style(format!("分頁抓取中斷：{}", err)).yellow().dim()
+        );
+    } else {
+        spinner.finish(&format!(
+            "找到 {} 個小版本、{} 個大版本",
+            releases.minor_releases.len(),
+            releases.major_release.is_some() as usize
+        ));
+    }
 
     if total == 0 {
         panel(
