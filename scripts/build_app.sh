@@ -85,7 +85,7 @@ done
 # Keep launcher alive until our specific news_lab instance exits,
 # not any unrelated news_lab process that may be running elsewhere.
 if [ -n "$OUR_PID" ]; then
-    while kill -0 "$OUR_PID" 2>/dev/null; do
+    while ps -p "$OUR_PID" -o comm= 2>/dev/null | grep -qx "news_lab"; do
         sleep 1
     done
 fi
