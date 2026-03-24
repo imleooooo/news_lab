@@ -62,10 +62,13 @@ cat > "$MACOS/launcher" << 'LAUNCHER'
 DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN="$DIR/news_lab"
 ENV_FILE="$DIR/../Resources/.env"
+# Kill any stale news_lab from a previous session that didn't exit cleanly
+pkill -x news_lab 2>/dev/null || true
+sleep 0.5
 osascript -e "tell application \"Terminal\" to do script \"set -a; [ -f '$ENV_FILE' ] && source '$ENV_FILE'; set +a; '$BIN'; exit 0\""
 # Keep launcher alive so Dock icon stays visible until news_lab exits
-sleep 2
-while pgrep -xq "news_lab"; do
+sleep 3
+while pgrep -x news_lab > /dev/null 2>&1; do
     sleep 1
 done
 LAUNCHER
