@@ -3,7 +3,7 @@ use crate::fetcher::docs::fetch_doc_page;
 use crate::llm::LLMClient;
 use crate::radar::Blip;
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Utc};
+use chrono::{NaiveDate, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -50,6 +50,11 @@ pub struct BlipCaseBundle {
 struct SearchResult {
     title: String,
     url: String,
+}
+
+struct PageCollection {
+    pages: String,
+    fetched_pages: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,17 +131,19 @@ pub async fn fetch_enterprise_cases(
         return Ok(empty);
     }
 
-    let pages = collect_case_pages(blip, &hosts, &client).await;
-    if pages.is_empty() {
+    let page_collection = collect_case_pages(blip, &hosts, &client).await?;
+    if page_collection.pages.is_empty() {
         let empty = empty_bundle(blip, policy);
-        put_bundle_cache(&cache_key, &empty);
+        if page_collection.fetched_pages > 0 {
+            put_bundle_cache(&cache_key, &empty);
+        }
         return Ok(empty);
     }
 
     let prompt = CASE_EXTRACTION_PROMPT
         .replace("{name}", &blip.name)
         .replace("{max_cases}", &max_cases.to_string())
-        .replace("{pages}", &pages);
+        .replace("{pages}", &page_collection.pages);
     let response = llm.invoke_with_limit(&prompt, 2048).await?;
     let parsed: CaseExtraction =
         serde_json::from_str(&sanitize_json_strings(extract_json(&response)))
@@ -198,10 +205,14 @@ async fn discover_official_hosts(blip: &Blip, client: &reqwest::Client) -> Resul
     }
 
     let query = format!("{} official website", blip.name);
-    for result in search_duckduckgo(&query, client).await.into_iter().take(6) {
+    for result in search_duckduckgo(&query, client)
+        .await?
+        .into_iter()
+        .take(6)
+    {
         if let Some(host) = url_host(&result.url) {
             if !is_excluded_host(&host)
-                && title_mentions_product(&result.title, &blip.name)
+                && title_matches_official_host(&result.title, &blip.name, &host)
                 && seen.insert(host.clone())
             {
                 hosts.push(host);
@@ -226,9 +237,15 @@ async fn github_homepage_host(repo: &str, client: &reqwest::Client) -> Option<St
     url_host(&repo.homepage)
 }
 
-async fn collect_case_pages(blip: &Blip, hosts: &[String], client: &reqwest::Client) -> String {
+async fn collect_case_pages(
+    blip: &Blip,
+    hosts: &[String],
+    client: &reqwest::Client,
+) -> Result<PageCollection> {
     let mut sections = Vec::new();
     let mut seen_urls = HashSet::new();
+    let mut fetched_pages = 0usize;
+    let mut candidate_urls = 0usize;
 
     for host in hosts.iter().take(3) {
         let query = format!(
@@ -236,13 +253,19 @@ async fn collect_case_pages(blip: &Blip, hosts: &[String], client: &reqwest::Cli
             host = host,
             name = blip.name
         );
-        for result in search_duckduckgo(&query, client).await.into_iter().take(5) {
+        for result in search_duckduckgo(&query, client)
+            .await?
+            .into_iter()
+            .take(5)
+        {
             if !host_matches(&result.url, host) || !seen_urls.insert(result.url.clone()) {
                 continue;
             }
+            candidate_urls += 1;
             let Some(page) = fetch_doc_page(&result.url).await else {
                 continue;
             };
+            fetched_pages += 1;
             if !looks_like_case_page(&page.title, &page.text, &blip.name) {
                 continue;
             }
@@ -261,18 +284,35 @@ async fn collect_case_pages(blip: &Blip, hosts: &[String], client: &reqwest::Cli
         }
     }
 
-    sections.join("\n\n---\n\n")
+    if candidate_urls > 0 && fetched_pages == 0 {
+        return Err(anyhow!("無法抓取企業案例候選頁面"));
+    }
+
+    Ok(PageCollection {
+        pages: sections.join("\n\n---\n\n"),
+        fetched_pages,
+    })
 }
 
-async fn search_duckduckgo(query: &str, client: &reqwest::Client) -> Vec<SearchResult> {
+fn search_error(query: &str, reason: &str) -> anyhow::Error {
+    anyhow!("DuckDuckGo 搜尋失敗（{}）: {}", query, reason)
+}
+
+async fn search_duckduckgo(query: &str, client: &reqwest::Client) -> Result<Vec<SearchResult>> {
     let url = format!("{}{}", SEARCH_ENDPOINT, urlencoding(query));
-    let Ok(resp) = client.get(&url).send().await else {
-        return vec![];
-    };
-    let Ok(body) = resp.text().await else {
-        return vec![];
-    };
-    parse_duckduckgo_results(&body)
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|_| search_error(query, "request error"))?;
+    if !resp.status().is_success() {
+        return Err(search_error(query, &format!("HTTP {}", resp.status())));
+    }
+    let body = resp
+        .text()
+        .await
+        .map_err(|_| search_error(query, "response body error"))?;
+    Ok(parse_duckduckgo_results(&body))
 }
 
 fn parse_duckduckgo_results(html: &str) -> Vec<SearchResult> {
@@ -323,7 +363,7 @@ fn extract_date(text: &str) -> Option<String> {
     static SLASH_DATE_RE: OnceLock<Regex> = OnceLock::new();
     let re = SLASH_DATE_RE.get_or_init(|| Regex::new(r"\b(20\d{2}/\d{2}/\d{2})\b").unwrap());
     re.captures(text)
-        .and_then(|cap| DateTime::parse_from_str(&cap[1], "%Y/%m/%d").ok())
+        .and_then(|cap| NaiveDate::parse_from_str(&cap[1], "%Y/%m/%d").ok())
         .map(|d| d.format("%Y-%m-%d").to_string())
 }
 
@@ -331,6 +371,41 @@ fn title_mentions_product(title: &str, name: &str) -> bool {
     let title = normalize_text(title);
     let name = normalize_text(name);
     !name.is_empty() && title.contains(&name)
+}
+
+fn title_matches_official_host(title: &str, product_name: &str, host: &str) -> bool {
+    if title_mentions_product(title, product_name) {
+        return true;
+    }
+
+    let host_label = host_brand_label(host);
+    if host_label.is_empty() {
+        return false;
+    }
+
+    let title = normalize_text(title);
+    !title.is_empty() && title.contains(&host_label)
+}
+
+fn host_brand_label(host: &str) -> String {
+    let host = host
+        .split(':')
+        .next()
+        .unwrap_or(host)
+        .trim_start_matches("www.");
+    let labels: Vec<&str> = host.split('.').collect();
+    for label in labels.iter().rev().skip(1) {
+        if !matches!(
+            *label,
+            "www" | "docs" | "doc" | "blog" | "help" | "support" | "home"
+        ) {
+            return normalize_text(label);
+        }
+    }
+    labels
+        .first()
+        .map(|s| normalize_text(s))
+        .unwrap_or_default()
 }
 
 fn is_excluded_host(host: &str) -> bool {
@@ -520,5 +595,22 @@ mod tests {
             "Redis Enterprise Official Site",
             "Redis"
         ));
+    }
+
+    #[test]
+    fn official_host_match_accepts_vendor_title() {
+        assert!(title_matches_official_host(
+            "OpenAI",
+            "ChatGPT Enterprise",
+            "openai.com"
+        ));
+    }
+
+    #[test]
+    fn slash_dates_are_normalized() {
+        assert_eq!(
+            extract_date("Published on 2025/03/12 by vendor"),
+            Some("2025-03-12".to_string())
+        );
     }
 }
