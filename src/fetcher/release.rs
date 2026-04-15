@@ -154,8 +154,8 @@ pub fn normalise_repo(input: &str) -> String {
 /// Returns:
 /// - `Ok(releases)` — HTTP 2xx; `releases` may be empty on the last page.
 /// - `Err(msg)`     — non-2xx (e.g. 403 rate-limit, 404 unknown repo) or
-///                    network failure; the caller should stop paginating and
-///                    surface `msg` to the user.
+///   network failure; the caller should stop paginating and
+///   surface `msg` to the user.
 async fn fetch_page(
     client: &reqwest::Client,
     repo: &str,
@@ -331,9 +331,7 @@ mod tests {
 
     #[test]
     fn buffer_insufficient_missing_major() {
-        let buf: Vec<ReleaseItem> = (1..=5)
-            .map(|i| make_item(&format!("v1.0.{}", i)))
-            .collect();
+        let buf: Vec<ReleaseItem> = (1..=5).map(|i| make_item(&format!("v1.0.{}", i))).collect();
         assert!(!buffer_is_sufficient(&buf, false));
     }
 

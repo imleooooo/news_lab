@@ -1,3 +1,4 @@
+pub mod cases;
 pub mod terminal;
 
 use crate::fetcher::NewsItem;

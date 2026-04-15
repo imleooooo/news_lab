@@ -12,6 +12,7 @@ use config::{configure, Config};
 use console::style;
 use fetcher::{
     arxiv::fetch_domain_papers,
+    cases::{fetch_enterprise_cases, SourcePolicy},
     cncf::{fetch_cncf_by_keyword, fetch_cncf_projects},
     docs::fetch_doc_page,
     huggingface::{fetch_hf_models, fmt_num, HFSort},
@@ -137,8 +138,10 @@ async fn run_news_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()>
     // via "ray serve" / "ray operator" are not discarded when the raw query is "kuberay".
     // HN link posts (empty story_text) are intentionally kept — show title + URL.
     let en_kw_lower: Vec<String> = en_kw.iter().map(|k| k.to_lowercase()).collect();
-    let hn_filtered = hn.into_iter().filter(|item| !item.url.contains("github.com")).filter(
-        |item| {
+    let hn_filtered = hn
+        .into_iter()
+        .filter(|item| !item.url.contains("github.com"))
+        .filter(|item| {
             if en_kw_lower.is_empty() {
                 return true;
             }
@@ -148,12 +151,18 @@ async fn run_news_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()>
                 item.description.to_lowercase()
             );
             en_kw_lower.iter().any(|k| combined.contains(k.as_str()))
-        },
-    );
+        });
 
     let mut items: Vec<_> = hn_filtered
-        .chain(rss.into_iter().filter(|item| !item.description.trim().is_empty()))
-        .chain(medium.into_iter().filter(|item| !item.description.trim().is_empty()))
+        .chain(
+            rss.into_iter()
+                .filter(|item| !item.description.trim().is_empty()),
+        )
+        .chain(
+            medium
+                .into_iter()
+                .filter(|item| !item.description.trim().is_empty()),
+        )
         .collect();
 
     // Deduplicate by URL across all sources
@@ -456,7 +465,11 @@ async fn kg_github_search(node: &str, cfg: &Config, llm: &LLMClient) -> Option<S
 
     // Let user pick a repo to drill into as KG, or go back
     let mut choices = vec!["← 返回".to_string()];
-    choices.extend(repo_titles.iter().map(|t| format!("▲ {} — 深入知識圖譜", t)));
+    choices.extend(
+        repo_titles
+            .iter()
+            .map(|t| format!("▲ {} — 深入知識圖譜", t)),
+    );
 
     let sel = Select::new("選擇要深入的專案:", choices)
         .prompt()
@@ -581,7 +594,11 @@ async fn run_knowledge_graph(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<
             let mut choices: Vec<String> = vec![back_label.to_string()];
 
             for cluster in &kg.clusters {
-                let icon = if cluster.name == "GitHub Repos" { "▲" } else { "◆" };
+                let icon = if cluster.name == "GitHub Repos" {
+                    "▲"
+                } else {
+                    "◆"
+                };
                 for node in &cluster.nodes {
                     let line = if node.description.is_empty() {
                         format!("{} [{}]  {}", icon, cluster.name, node.name)
@@ -939,7 +956,26 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
                 .and_then(|s| s.parse::<usize>().ok())
             {
                 if let Some(b) = blips.iter().find(|b| b.number == n) {
-                    radar_terminal::show_blip_detail(b, &q_names);
+                    let spinner = Spinner::new(&format!("查找「{}」的企業案例...", b.name));
+                    let case_result =
+                        fetch_enterprise_cases(b, llm, 3, SourcePolicy::OfficialOnly).await;
+                    match &case_result {
+                        Ok(bundle) => {
+                            if bundle.cases.is_empty() {
+                                spinner.finish("未找到符合官方標準的公開案例");
+                            } else {
+                                spinner.finish(&format!("找到 {} 筆官方案例", bundle.cases.len()));
+                            }
+                        }
+                        Err(_) => spinner.finish("企業案例查找失敗"),
+                    }
+
+                    radar_terminal::show_blip_detail(
+                        b,
+                        &q_names,
+                        case_result.as_ref().ok(),
+                        case_result.as_ref().err().map(|e| e.to_string()),
+                    );
                     separator();
 
                     // Sub-menu: competitive analysis or back
@@ -1071,15 +1107,16 @@ async fn run_cncf_summary(cfg: &Config, llm: &LLMClient) -> Result<()> {
 
         separator();
 
-        let maturity_filter = if maturity_choice.contains("Graduated") && !maturity_choice.contains("全部") {
-            Some("graduated")
-        } else if maturity_choice.contains("Incubating") {
-            Some("incubating")
-        } else if maturity_choice.contains("Sandbox") {
-            Some("sandbox")
-        } else {
-            None
-        };
+        let maturity_filter =
+            if maturity_choice.contains("Graduated") && !maturity_choice.contains("全部") {
+                Some("graduated")
+            } else if maturity_choice.contains("Incubating") {
+                Some("incubating")
+            } else if maturity_choice.contains("Sandbox") {
+                Some("sandbox")
+            } else {
+                None
+            };
 
         let spinner = Spinner::new("正在從 CNCF TOC 抓取最近專案...");
         let result = fetch_cncf_projects(max, maturity_filter).await;
@@ -1160,7 +1197,11 @@ async fn run_docs_summary(llm: &LLMClient) -> Result<()> {
 
         // Basic URL sanity check
         if !url.starts_with("http://") && !url.starts_with("https://") {
-            panel("技術文件摘要", "請輸入完整 URL（以 https:// 開頭）。", "yellow");
+            panel(
+                "技術文件摘要",
+                "請輸入完整 URL（以 https:// 開頭）。",
+                "yellow",
+            );
             continue;
         }
 
@@ -1275,9 +1316,12 @@ async fn run_repo_releases(llm: &LLMClient) -> Result<()> {
     if !releases.minor_releases.is_empty() {
         println!(
             "\n  {}",
-            style(format!("最新 {} 個小版本更新", releases.minor_releases.len()))
-                .cyan()
-                .bold()
+            style(format!(
+                "最新 {} 個小版本更新",
+                releases.minor_releases.len()
+            ))
+            .cyan()
+            .bold()
         );
         println!("  {}", style("─".repeat(72)).cyan().dim());
 
@@ -1296,8 +1340,15 @@ async fn run_repo_releases(llm: &LLMClient) -> Result<()> {
                 .map(|d| d.format("%Y-%m-%d").to_string())
                 .unwrap_or_else(|| "未知".to_string());
 
-            let content = format!("版本: {} | 發布: {}\n\n{}", item.tag_name, date_str, summary);
-            panel(&format!("[小版本 {}] {}", i + 1, item.name), &content, "cyan");
+            let content = format!(
+                "版本: {} | 發布: {}\n\n{}",
+                item.tag_name, date_str, summary
+            );
+            panel(
+                &format!("[小版本 {}] {}", i + 1, item.name),
+                &content,
+                "cyan",
+            );
             print_url(&item.url);
             separator();
         }
@@ -1305,10 +1356,7 @@ async fn run_repo_releases(llm: &LLMClient) -> Result<()> {
 
     // ── Latest major release ───────────────────────────────────────────────
     if let Some(ref major) = releases.major_release {
-        println!(
-            "\n  {}",
-            style("最新大版本更新").yellow().bold()
-        );
+        println!("\n  {}", style("最新大版本更新").yellow().bold());
         println!("  {}", style("─".repeat(72)).yellow().dim());
 
         let spinner = Spinner::new(&format!("摘要大版本: {}...", major.tag_name));
@@ -1320,7 +1368,10 @@ async fn run_repo_releases(llm: &LLMClient) -> Result<()> {
             .map(|d| d.format("%Y-%m-%d").to_string())
             .unwrap_or_else(|| "未知".to_string());
 
-        let content = format!("版本: {} | 發布: {}\n\n{}", major.tag_name, date_str, summary);
+        let content = format!(
+            "版本: {} | 發布: {}\n\n{}",
+            major.tag_name, date_str, summary
+        );
         panel(&format!("[大版本] {}", major.name), &content, "yellow");
         print_url(&major.url);
         separator();
@@ -1505,11 +1556,7 @@ async fn main() -> Result<()> {
                 }
                 f if f.contains("清空快取") => {
                     let n = cache::clear_all();
-                    println!(
-                        "  {} 已清除 {} 筆快取",
-                        style("✓").green(),
-                        style(n).cyan()
-                    );
+                    println!("  {} 已清除 {} 筆快取", style("✓").green(), style(n).cyan());
                     separator();
                     continue 'feat;
                 }

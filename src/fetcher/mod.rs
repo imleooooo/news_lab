@@ -1,4 +1,5 @@
 pub mod arxiv;
+pub mod cases;
 pub mod cncf;
 pub mod docs;
 pub mod huggingface;

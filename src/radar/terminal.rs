@@ -1,4 +1,4 @@
-use super::Blip;
+use super::{cases::BlipCaseBundle, Blip};
 use crate::ui::panel;
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use console::style;
@@ -494,7 +494,12 @@ pub fn render_legend(blips: &[Blip], q_names: &HashMap<String, String>) {
 }
 
 // ── Blip detail panel ─────────────────────────────────────────────────────────
-pub fn show_blip_detail(blip: &Blip, q_names: &HashMap<String, String>) {
+pub fn show_blip_detail(
+    blip: &Blip,
+    q_names: &HashMap<String, String>,
+    case_bundle: Option<&BlipCaseBundle>,
+    case_error: Option<String>,
+) {
     let q_label = q_names
         .get(&blip.quadrant)
         .cloned()
@@ -547,9 +552,38 @@ pub fn show_blip_detail(blip: &Blip, q_names: &HashMap<String, String>) {
         }
     }
 
+    // Enterprise cases
+    content.push_str("\n\n🏢 企業案例\n");
+    if let Some(bundle) = case_bundle {
+        if bundle.cases.is_empty() {
+            content.push_str("  • 未找到符合官方標準的公開案例\n");
+        } else {
+            for case in &bundle.cases {
+                content.push_str(&format!("  • {}：{}\n", case.company, case.usage_summary));
+                let mut meta = vec![case.publisher.clone()];
+                if !case.published_at.is_empty() {
+                    meta.push(case.published_at.clone());
+                }
+                if !case.evidence_type.is_empty() {
+                    meta.push(case.evidence_type.clone());
+                }
+                content.push_str(&format!(
+                    "    來源：{} — {}\n",
+                    case.title,
+                    meta.join(" | ")
+                ));
+                content.push_str(&format!("    URL：{}\n", case.url));
+            }
+        }
+    } else if let Some(err) = case_error {
+        content.push_str(&format!("  • 查找失敗：{}\n", err));
+    } else {
+        content.push_str("  • 尚未載入案例資料\n");
+    }
+
     // Pros
     if !blip.pros.is_empty() {
-        content.push_str("\n\n✅ 推薦理由\n");
+        content.push_str("\n\n推薦理由\n");
         for p in &blip.pros {
             content.push_str(&format!("  • {}\n", p));
         }
