@@ -129,8 +129,8 @@ fn extract_title(html: &str) -> String {
 fn extract_nav_links(html: &str, page_url: &str) -> Vec<String> {
     let host = page_host(page_url);
     let asset_exts = [
-        ".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".css", ".js",
-        ".ico", ".woff", ".woff2", ".ttf", ".eot", ".pdf", ".zip",
+        ".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".css", ".js", ".ico", ".woff", ".woff2",
+        ".ttf", ".eot", ".pdf", ".zip",
     ];
 
     let mut links: Vec<String> = Vec::new();
@@ -214,7 +214,7 @@ pub async fn fetch_doc_page(url: &str) -> Option<DocPage> {
                     break;
                 }
             }
-            Ok(None) => break,    // clean end of body — process what we have
+            Ok(None) => break,     // clean end of body — process what we have
             Err(_) => return None, // stream error — fail rather than summarize partial content
         }
     }
@@ -277,7 +277,10 @@ mod tests {
 
     #[test]
     fn external_absolute_different_host() {
-        assert!(!is_internal("https://github.com/kubernetes", "kubernetes.io"));
+        assert!(!is_internal(
+            "https://github.com/kubernetes",
+            "kubernetes.io"
+        ));
     }
 
     #[test]

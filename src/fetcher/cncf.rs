@@ -191,7 +191,14 @@ fn urlencoding(s: &str) -> String {
 /// Search GitHub repos that have the `cncf` topic and match `kw`.
 pub async fn fetch_cncf_by_keyword(kw: &str, max: usize) -> Vec<CNCFProject> {
     // Same skip list as the TOC flow — excludes CNCF org/meta repos.
-    const SKIP_REPOS: &[&str] = &["toc", "landscape", ".github", "artwork", "foundation", "cncf"];
+    const SKIP_REPOS: &[&str] = &[
+        "toc",
+        "landscape",
+        ".github",
+        "artwork",
+        "foundation",
+        "cncf",
+    ];
 
     let token = std::env::var("GITHUB_TOKEN").ok();
     let client = reqwest::Client::builder()
@@ -216,7 +223,9 @@ pub async fn fetch_cncf_by_keyword(kw: &str, max: usize) -> Vec<CNCFProject> {
             req = req.header("Authorization", format!("token {}", tok));
         }
         let Ok(resp) = req.send().await else { break };
-        let Ok(result) = resp.json::<SearchResult>().await else { break };
+        let Ok(result) = resp.json::<SearchResult>().await else {
+            break;
+        };
         let done = result.items.len() < per_page; // last page
 
         for r in result.items {
@@ -270,10 +279,7 @@ pub async fn fetch_cncf_by_keyword(kw: &str, max: usize) -> Vec<CNCFProject> {
 /// - `Some("graduated")`  → graduated only
 /// - `Some("incubating")` → incubating only
 /// - `Some("sandbox")`    → sandbox only
-pub async fn fetch_cncf_projects(
-    max: usize,
-    maturity_filter: Option<&str>,
-) -> Vec<CNCFProject> {
+pub async fn fetch_cncf_projects(max: usize, maturity_filter: Option<&str>) -> Vec<CNCFProject> {
     let token = std::env::var("GITHUB_TOKEN").ok();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
