@@ -235,6 +235,14 @@ fn ring_rank(ring: &str) -> usize {
     }
 }
 
+fn prefer_display_name(candidate: &Blip, existing: &Blip) -> bool {
+    let candidate_len = key(&candidate.name).len();
+    let existing_len = key(&existing.name).len();
+
+    candidate_len > existing_len
+        || (candidate_len == existing_len && ring_rank(&candidate.ring) < ring_rank(&existing.ring))
+}
+
 fn normalize_kind(kind: &str) -> String {
     let normalized = kind.trim().to_lowercase();
     match normalized.as_str() {
@@ -291,21 +299,33 @@ fn deduplicate(blips: Vec<Blip>) -> Vec<Blip> {
             let et = canonical_tokens(&existing.name);
             let ekind = effective_kind(existing);
 
-            if !ckind.is_empty() && !ekind.is_empty() && ckind != ekind {
-                continue;
-            }
-
             // Only merge when canonicalized names are identical or their canonical token
             // sets match exactly. This catches known aliases such as k8s/Kubernetes while
             // keeping distinct technologies like Java/JavaScript or Redis/RedisInsight apart.
-            let is_dup = ck == ek || (!ct.is_empty() && ct == et);
+            let same_canonical = ck == ek;
+            let same_tokens = !ct.is_empty() && ct == et;
+            let compatible_kind = ckind.is_empty() || ekind.is_empty() || ckind == ekind;
+            let is_dup = same_canonical || (same_tokens && compatible_kind);
 
             if is_dup {
                 let c_rank = ring_rank(&candidate.ring);
                 let e_rank = ring_rank(&existing.ring);
-                if ck.len() > ek.len() || (ck.len() == ek.len() && c_rank < e_rank) {
+                let name = if prefer_display_name(&candidate, existing) {
+                    candidate.name.clone()
+                } else {
+                    existing.name.clone()
+                };
+                let canonical_name = if prefer_display_name(&candidate, existing) {
+                    candidate.canonical_name.clone()
+                } else {
+                    existing.canonical_name.clone()
+                };
+
+                if c_rank < e_rank {
                     *existing = candidate.clone();
                 }
+                existing.name = name;
+                existing.canonical_name = canonical_name;
                 merged = true;
                 break;
             }
@@ -763,6 +783,18 @@ mod tests {
 
         assert_eq!(deduped.len(), 1);
         assert_eq!(canonical_key(&deduped[0].name), "kubernetes");
+        assert_eq!(deduped[0].name, "Kubernetes");
+        assert_eq!(deduped[0].ring, "adopt");
+    }
+
+    #[test]
+    fn deduplicate_keeps_descriptive_alias_when_short_alias_has_better_ring() {
+        let blips = vec![blip("PostgreSQL", "trial"), blip("Postgres", "adopt")];
+
+        let deduped = deduplicate(blips);
+
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].name, "PostgreSQL");
         assert_eq!(deduped[0].ring, "adopt");
     }
 
@@ -785,18 +817,20 @@ mod tests {
     }
 
     #[test]
-    fn deduplicate_respects_kind_boundaries() {
-        let mut framework = blip("Redis", "adopt");
-        framework.canonical_name = "redis".to_string();
-        framework.kind = "database".to_string();
+    fn deduplicate_merges_exact_canonical_name_across_inconsistent_kinds() {
+        let mut database = blip("Redis", "adopt");
+        database.canonical_name = "redis".to_string();
+        database.kind = "database".to_string();
 
         let mut tool = blip("Redis", "trial");
         tool.canonical_name = "redis".to_string();
         tool.kind = "tool".to_string();
 
-        let deduped = deduplicate(vec![normalize_blip(framework), normalize_blip(tool)]);
+        let deduped = deduplicate(vec![normalize_blip(database), normalize_blip(tool)]);
 
-        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].name, "Redis");
+        assert_eq!(deduped[0].ring, "adopt");
     }
 
     #[test]

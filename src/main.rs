@@ -976,14 +976,16 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
         );
     }
 
-    cache::put_with_ttl(
-        &cache_key,
-        &RadarCacheEntry {
-            q_names: q_names.clone(),
-            blips: blips.clone(),
-        },
-        RADAR_CACHE_TTL_SECS,
-    );
+    if activity_complete {
+        cache::put_with_ttl(
+            &cache_key,
+            &RadarCacheEntry {
+                q_names: q_names.clone(),
+                blips: blips.clone(),
+            },
+            RADAR_CACHE_TTL_SECS,
+        );
+    }
 
     run_radar_browser(kw, q_names, blips, llm).await
 }
