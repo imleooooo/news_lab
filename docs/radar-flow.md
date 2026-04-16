@@ -10,7 +10,7 @@
 使用者輸入關鍵字
        │
        ▼
- ① 抓取技術新聞          fetch_tech_news()
+ ① 抓取技術訊號          fetch_radar_signals()
        │
        ▼
  ② LLM 提取 Blip        extract_blips()
@@ -36,17 +36,17 @@
 
 ---
 
-## ① 抓取技術新聞
+## ① 抓取技術訊號
 
 **位置：** `main.rs:run_terminal_radar`
 
 ```rust
 let fetch_n = cfg.max_results.max(12);
-let items = fetch_tech_news(kw, fetch_n).await;
+let items = fetch_radar_signals(kw, fetch_n).await;
 ```
 
-- 同時呼叫 Hacker News（Algolia API）與 GitHub Search API
-- 結果混合：60% HN + 40% GitHub，依發布日期排序
+- 同時呼叫 GitHub 熱門 repo 與 GitHub 新興 repo 搜尋
+- 結果去重後作為雷達的技術訊號輸入
 - 最少抓取 12 筆（雷達圖需要足夠上下文給 LLM 判斷生態）
 
 ---
@@ -57,15 +57,15 @@ let items = fetch_tech_news(kw, fetch_n).await;
 
 ### 2.1 組合 Prompt
 
-取前 10 筆新聞標題，格式化為：
+取前 10 筆技術訊號，格式化為：
 ```
-- [Hacker News] vLLM v0.4 supports multi-GPU inference
-- [GitHub] microsoft/promptflow — LLMOps toolkit
+- [GitHub] vllm-project/vllm | ⭐ 48512 | Python | LLM serving engine
+- [GitHub] kubeflow/kubeflow | ⭐ 14321 | Go | Machine learning toolkit for Kubernetes
 ...
 ```
 
 注入 `RADAR_PROMPT`，要求 LLM：
-1. 找出新聞中所有開源/閉源專案、模型、工具、框架
+1. 找出技術訊號中所有開源/閉源專案、模型、工具、框架
 2. 補充 LLM 自身知識中該領域重要項目
 3. 為 4 個象限命名（依領域特性，例如 AI 領域：模型/框架/工具/技術）
 4. 為每個項目判斷成熟度環形

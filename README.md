@@ -22,7 +22,7 @@
 | **arXiv 論文摘要** | LLM 自動擴展搜尋關鍵字，摘要近 30 天論文的研究問題與貢獻 |
 | **Podcast 摘要** | 透過 iTunes Search API + RSS Feed 搜尋技術播客並摘要集數 |
 | **知識圖譜** | 分析技術資料，在終端機以 ASCII 繪製技術分類與關係圖 |
-| **技術生態雷達 + 競品分析** | 生成互動式 ASCII 雷達圖（Adopt / Trial / Assess / Hold），點選項目可進行 AI 驅動的競品比較表與選型建議 |
+| **技術生態雷達 + 競品分析** | 根據 GitHub 技術訊號生成互動式 ASCII 雷達圖（Adopt / Trial / Assess / Hold），點選項目可進行 AI 驅動的競品比較表與選型建議 |
 | **HuggingFace 模型整理** | 抓取 HuggingFace 前 20 名熱門模型（依熱門趨勢 / 下載數 / 收藏數），以繁體中文摘要 |
 | **CNCF 專案整理** | 從 CNCF TOC GitHub 整理最近值得關注的 Graduated / Incubating / Sandbox 專案 |
 

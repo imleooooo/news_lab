@@ -20,7 +20,7 @@ use fetcher::{
     release::{fetch_repo_releases, normalise_repo},
     tech::{
         expand_news_keywords, fetch_all_rss, fetch_github, fetch_github_emerging,
-        fetch_hackernews_multi, fetch_medium_rss, fetch_tech_news,
+        fetch_hackernews_multi, fetch_medium_rss, fetch_radar_signals, fetch_tech_news,
     },
 };
 use inquire::{validator::Validation, Select, Text};
@@ -868,10 +868,10 @@ fn render_analysis_sections(text: &str) {
 // ── Run: Terminal Radar ────────────────────────────────────────────────────────
 
 async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()> {
-    // Fetch news (at least 12 items for better radar coverage)
+    // Fetch radar signals (at least 12 items for better radar coverage)
     let fetch_n = cfg.max_results.max(12);
     let spinner = Spinner::new(&format!("正在抓取技術資料：{}", kw));
-    let items = fetch_tech_news(kw, fetch_n).await;
+    let items = fetch_radar_signals(kw, fetch_n).await;
     spinner.finish(&format!("取得 {} 筆資料", items.len()));
 
     if items.is_empty() {

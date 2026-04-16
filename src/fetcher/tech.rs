@@ -1,5 +1,6 @@
 use super::NewsItem;
 use crate::llm::LLMClient;
+use crate::radar::RadarSignal;
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use quick_xml::events::Event;
@@ -338,6 +339,37 @@ pub async fn fetch_tech_news(kw: &str, max: usize) -> Vec<NewsItem> {
     combined
 }
 
+pub async fn fetch_radar_signals(kw: &str, max: usize) -> Vec<RadarSignal> {
+    let stable_max = (max as f64 * 0.7).ceil() as usize;
+    let emerging_max = max.saturating_sub(stable_max).max(1);
+
+    let (stable, emerging) = tokio::join!(
+        fetch_github(kw, stable_max.max(1)),
+        fetch_github_emerging(kw, emerging_max)
+    );
+
+    let mut seen = std::collections::HashSet::new();
+    let mut combined: Vec<RadarSignal> = stable
+        .into_iter()
+        .chain(emerging)
+        .filter_map(|item| {
+            let key = item.title.to_lowercase();
+            if !seen.insert(key) {
+                return None;
+            }
+            Some(RadarSignal {
+                title: item.title,
+                source: item.source,
+                url: item.url,
+                summary: item.description,
+            })
+        })
+        .collect();
+
+    combined.truncate(max);
+    combined
+}
+
 fn urlencoding(s: &str) -> String {
     s.chars()
         .map(|c| match c {
@@ -540,9 +572,9 @@ fn parse_rss_items(xml: &str, source: &str, keywords: &[String], max: usize) -> 
                         let desc_lower = f_desc.to_lowercase();
                         let combined = format!("{} {}", title_lower, desc_lower);
                         let matches = kw_lower.iter().any(|k| combined.contains(k.as_str()))
-                            || phrase_tokens.iter().any(|tokens| {
-                                tokens.iter().all(|t| combined.contains(t.as_str()))
-                            });
+                            || phrase_tokens
+                                .iter()
+                                .any(|tokens| tokens.iter().all(|t| combined.contains(t.as_str())));
                         if !matches {
                             buf.clear();
                             continue;

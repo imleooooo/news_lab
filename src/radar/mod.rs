@@ -1,7 +1,6 @@
 pub mod cases;
 pub mod terminal;
 
-use crate::fetcher::NewsItem;
 use crate::llm::LLMClient;
 use anyhow::Result;
 use chrono::Utc;
@@ -45,16 +44,25 @@ pub struct Blip {
     pub number: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct RadarSignal {
+    pub title: String,
+    pub source: String,
+    #[allow(dead_code)]
+    pub url: String,
+    pub summary: String,
+}
+
 // ── Prompt (matches Python version) ───────────────────────────────────────────
 
 const RADAR_PROMPT: &str = r#"你是一位技術生態系統分析師。今天日期：{today}。
-根據以下關於「{keyword}」的最新新聞，分析該領域完整的開源/閉源專案生態。
+根據以下關於「{keyword}」的技術訊號，分析該領域完整的開源/閉源專案生態。
 
-最新新聞（{n_news} 篇）：
-{news_list}
+技術訊號（{n_signals} 筆）：
+{signal_list}
 
 任務：
-1. 從新聞中找出所有提到的開源/閉源專案、模型、工具、框架、技術方法
+1. 從技術訊號中找出所有提到的開源/閉源專案、模型、工具、框架、技術方法
 2. 加入你知道的「{keyword}」領域其他重要專案（確保生態圖完整）
 3. 根據「{keyword}」領域特性，為 4 個象限命名（例如 AI 領域可用「模型、框架、工具、技術」）
 4. 為每個項目判斷成熟度環形（以 {today} 為基準，評估當下的業界地位）：
@@ -375,14 +383,14 @@ pub fn default_quadrant_names() -> HashMap<String, String> {
 }
 
 pub async fn extract_blips(
-    items: &[NewsItem],
+    items: &[RadarSignal],
     kw: &str,
     llm: &LLMClient,
 ) -> Result<(HashMap<String, String>, Vec<Blip>)> {
-    let news_list: String = items
+    let signal_list: String = items
         .iter()
         .take(10)
-        .map(|item| format!("- [{}] {}", item.source, item.title))
+        .map(|item| format!("- [{}] {} | {}", item.source, item.title, item.summary))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -390,8 +398,8 @@ pub async fn extract_blips(
     let prompt = RADAR_PROMPT
         .replace("{today}", &today)
         .replace("{keyword}", kw)
-        .replace("{n_news}", &items.len().min(10).to_string())
-        .replace("{news_list}", &news_list);
+        .replace("{n_signals}", &items.len().min(10).to_string())
+        .replace("{signal_list}", &signal_list);
 
     // Radar JSON can be large (15-40 blips); use higher token limit
     let response = llm.invoke_with_limit(&prompt, 16384).await?;
