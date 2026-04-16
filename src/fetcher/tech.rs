@@ -14,6 +14,8 @@ use std::sync::OnceLock;
 #[derive(Deserialize)]
 struct HNResponse {
     hits: Vec<HNHit>,
+    #[serde(default, rename = "nbPages")]
+    nb_pages: usize,
 }
 
 #[derive(Deserialize)]
@@ -62,23 +64,7 @@ pub async fn fetch_hackernews(kw: &str, max: usize) -> Vec<NewsItem> {
         let items: Vec<NewsItem> = data
             .hits
             .into_iter()
-            .filter(|h| !h.title.is_empty())
-            .map(|h| {
-                let published = DateTime::parse_from_rfc3339(&h.created_at)
-                    .ok()
-                    .map(|d| d.with_timezone(&Utc));
-                NewsItem {
-                    title: h.title.clone(),
-                    url: if h.url.is_empty() {
-                        format!("https://news.ycombinator.com/item?id={}", h.object_id)
-                    } else {
-                        h.url.clone()
-                    },
-                    source: "Hacker News".to_string(),
-                    published,
-                    description: h.story_text.chars().take(300).collect(),
-                }
-            })
+            .filter_map(hn_hit_to_news_item)
             .collect();
         if !items.is_empty() {
             return items;
@@ -342,20 +328,80 @@ pub async fn fetch_tech_news(kw: &str, max: usize) -> Vec<NewsItem> {
 pub async fn fetch_radar_signals(kw: &str, max: usize) -> Vec<RadarSignal> {
     let stable_max = (max as f64 * 0.7).ceil() as usize;
     let emerging_max = max.saturating_sub(stable_max).max(1);
-    let hn_max = max.max(1);
 
-    let (stable, emerging, hn) = tokio::join!(
+    let (stable, emerging) = tokio::join!(
         fetch_github(kw, stable_max.max(1)),
-        fetch_github_emerging(kw, emerging_max),
-        fetch_hackernews(kw, hn_max)
+        fetch_github_emerging(kw, emerging_max)
     );
 
     let github_items = interleave_news_items(emerging, stable);
+    let github_unique = count_unique_titles(&github_items);
+    let hn_needed = max.saturating_sub(github_unique);
+    let hn = fetch_hackernews_backfill(kw, hn_needed, &github_items).await;
     let merged_items = append_news_items(github_items, hn);
     let mut combined = news_items_to_radar_signals(merged_items);
 
     combined.truncate(max);
     combined
+}
+
+async fn fetch_hackernews_backfill(
+    kw: &str,
+    needed: usize,
+    existing_items: &[NewsItem],
+) -> Vec<NewsItem> {
+    if needed == 0 {
+        return vec![];
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+
+    let mut seen_titles: std::collections::HashSet<String> = existing_items
+        .iter()
+        .map(|item| title_key(&item.title))
+        .collect();
+    let mut items = Vec::new();
+    let page_size = needed.clamp(20, 100);
+    let max_pages = 5usize;
+    let query = urlencoding(kw);
+    let urls = [
+        format!(
+            "https://hn.algolia.com/api/v1/search_by_date?query={query}&tags=story&hitsPerPage={page_size}"
+        ),
+        format!("https://hn.algolia.com/api/v1/search?query={query}&tags=story&hitsPerPage={page_size}"),
+        format!("https://hn.algolia.com/api/v1/search?query={query}&hitsPerPage={page_size}"),
+    ];
+
+    for base_url in urls {
+        for page in 0..max_pages {
+            let url = format!("{base_url}&page={page}");
+            let Some(data) = retry_get_json::<HNResponse>(&client, &url).await else {
+                break;
+            };
+            if data.hits.is_empty() {
+                break;
+            }
+
+            items.extend(collect_unique_news_items_by_title(
+                data.hits.into_iter().filter_map(hn_hit_to_news_item),
+                &mut seen_titles,
+                needed.saturating_sub(items.len()),
+            ));
+
+            if items.len() >= needed {
+                return items;
+            }
+
+            if page + 1 >= data.nb_pages.max(1) {
+                break;
+            }
+        }
+    }
+
+    items
 }
 
 fn interleave_news_items(primary: Vec<NewsItem>, secondary: Vec<NewsItem>) -> Vec<NewsItem> {
@@ -394,7 +440,7 @@ fn news_items_to_radar_signals(items: Vec<NewsItem>) -> Vec<RadarSignal> {
     items
         .into_iter()
         .filter_map(|item| {
-            let key = item.title.to_lowercase();
+            let key = title_key(&item.title);
             if !seen.insert(key) {
                 return None;
             }
@@ -406,6 +452,65 @@ fn news_items_to_radar_signals(items: Vec<NewsItem>) -> Vec<RadarSignal> {
             })
         })
         .collect()
+}
+
+fn hn_hit_to_news_item(h: HNHit) -> Option<NewsItem> {
+    if h.title.is_empty() {
+        return None;
+    }
+
+    let published = DateTime::parse_from_rfc3339(&h.created_at)
+        .ok()
+        .map(|d| d.with_timezone(&Utc));
+
+    Some(NewsItem {
+        title: h.title.clone(),
+        url: if h.url.is_empty() {
+            format!("https://news.ycombinator.com/item?id={}", h.object_id)
+        } else {
+            h.url.clone()
+        },
+        source: "Hacker News".to_string(),
+        published,
+        description: h.story_text.chars().take(300).collect(),
+    })
+}
+
+fn title_key(title: &str) -> String {
+    title.to_lowercase()
+}
+
+fn count_unique_titles(items: &[NewsItem]) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    items
+        .iter()
+        .filter(|item| seen.insert(title_key(&item.title)))
+        .count()
+}
+
+fn collect_unique_news_items_by_title<I>(
+    items: I,
+    seen_titles: &mut std::collections::HashSet<String>,
+    max: usize,
+) -> Vec<NewsItem>
+where
+    I: IntoIterator<Item = NewsItem>,
+{
+    if max == 0 {
+        return vec![];
+    }
+
+    let mut unique_items = Vec::new();
+    for item in items {
+        if seen_titles.insert(title_key(&item.title)) {
+            unique_items.push(item);
+            if unique_items.len() >= max {
+                break;
+            }
+        }
+    }
+
+    unique_items
 }
 
 fn urlencoding(s: &str) -> String {
@@ -579,15 +684,38 @@ mod tests {
         let titles: Vec<String> = signals.into_iter().map(|item| item.title).collect();
         assert_eq!(
             titles,
-            vec![
-                "emerging-1",
-                "stable-1",
-                "stable-2",
-                "hn-1",
-                "hn-2",
-                "hn-3"
-            ]
+            vec!["emerging-1", "stable-1", "stable-2", "hn-1", "hn-2", "hn-3"]
         );
+    }
+
+    #[test]
+    fn count_unique_titles_ignores_case_collisions() {
+        let items = vec![
+            item("RepoX", "GitHub"),
+            item("repox", "Hacker News"),
+            item("RepoY", "GitHub"),
+        ];
+
+        assert_eq!(count_unique_titles(&items), 2);
+    }
+
+    #[test]
+    fn collect_unique_news_items_by_title_skips_existing_and_later_duplicates() {
+        let mut seen =
+            std::collections::HashSet::from(["repo-a".to_string(), "repo-b".to_string()]);
+        let items = vec![
+            item("Repo-A", "Hacker News"),
+            item("Repo-C", "Hacker News"),
+            item("repo-c", "Hacker News"),
+            item("Repo-D", "Hacker News"),
+        ];
+
+        let titles: Vec<String> = collect_unique_news_items_by_title(items, &mut seen, 2)
+            .into_iter()
+            .map(|item| item.title)
+            .collect();
+
+        assert_eq!(titles, vec!["Repo-C", "Repo-D"]);
     }
 }
 
