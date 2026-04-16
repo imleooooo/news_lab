@@ -342,7 +342,7 @@ pub async fn fetch_tech_news(kw: &str, max: usize) -> Vec<NewsItem> {
 pub async fn fetch_radar_signals(kw: &str, max: usize) -> Vec<RadarSignal> {
     let stable_max = (max as f64 * 0.7).ceil() as usize;
     let emerging_max = max.saturating_sub(stable_max).max(1);
-    let hn_max = max.min(6).max(1);
+    let hn_max = max.max(1);
 
     let (stable, emerging, hn) = tokio::join!(
         fetch_github(kw, stable_max.max(1)),
@@ -351,11 +351,8 @@ pub async fn fetch_radar_signals(kw: &str, max: usize) -> Vec<RadarSignal> {
     );
 
     let github_items = interleave_news_items(emerging, stable);
-    let mut combined = news_items_to_radar_signals(github_items);
-
-    if combined.is_empty() {
-        combined = news_items_to_radar_signals(hn);
-    }
+    let merged_items = append_news_items(github_items, hn);
+    let mut combined = news_items_to_radar_signals(merged_items);
 
     combined.truncate(max);
     combined
@@ -384,6 +381,11 @@ fn interleave_news_items(primary: Vec<NewsItem>, secondary: Vec<NewsItem>) -> Ve
     }
 
     merged
+}
+
+fn append_news_items(mut primary: Vec<NewsItem>, secondary: Vec<NewsItem>) -> Vec<NewsItem> {
+    primary.extend(secondary);
+    primary
 }
 
 fn news_items_to_radar_signals(items: Vec<NewsItem>) -> Vec<RadarSignal> {
@@ -527,6 +529,65 @@ mod tests {
 
         let titles: Vec<String> = signals.into_iter().map(|item| item.title).collect();
         assert_eq!(titles, vec!["RepoX", "RepoY"]);
+    }
+
+    #[test]
+    fn append_news_items_preserves_backfill_order() {
+        let titles: Vec<String> = append_news_items(
+            vec![item("emerging-1", "GitHub"), item("stable-1", "GitHub")],
+            vec![item("hn-1", "Hacker News"), item("hn-2", "Hacker News")],
+        )
+        .into_iter()
+        .map(|item| item.title)
+        .collect();
+
+        assert_eq!(titles, vec!["emerging-1", "stable-1", "hn-1", "hn-2"]);
+    }
+
+    #[test]
+    fn radar_backfill_uses_hn_to_fill_requested_size_when_github_is_empty() {
+        let max = 12;
+        let hn: Vec<NewsItem> = (1..=max)
+            .map(|index| item(&format!("hn-{index}"), "Hacker News"))
+            .collect();
+
+        let merged = append_news_items(interleave_news_items(vec![], vec![]), hn);
+        let mut signals = news_items_to_radar_signals(merged);
+        signals.truncate(max);
+
+        assert_eq!(signals.len(), max);
+    }
+
+    #[test]
+    fn radar_backfill_uses_hn_when_github_results_are_partial() {
+        let max = 6;
+        let github_items = interleave_news_items(
+            vec![item("emerging-1", "GitHub")],
+            vec![item("stable-1", "GitHub"), item("stable-2", "GitHub")],
+        );
+        let hn = vec![
+            item("hn-1", "Hacker News"),
+            item("hn-2", "Hacker News"),
+            item("hn-3", "Hacker News"),
+            item("hn-4", "Hacker News"),
+        ];
+
+        let merged = append_news_items(github_items, hn);
+        let mut signals = news_items_to_radar_signals(merged);
+        signals.truncate(max);
+
+        let titles: Vec<String> = signals.into_iter().map(|item| item.title).collect();
+        assert_eq!(
+            titles,
+            vec![
+                "emerging-1",
+                "stable-1",
+                "stable-2",
+                "hn-1",
+                "hn-2",
+                "hn-3"
+            ]
+        );
     }
 }
 
