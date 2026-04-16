@@ -57,6 +57,11 @@ struct PageCollection {
     fetched_pages: usize,
 }
 
+struct OfficialHostDiscovery {
+    hosts: Vec<String>,
+    search_degraded: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct GitHubRepoResponse {
     #[serde(default)]
@@ -124,17 +129,19 @@ pub async fn fetch_enterprise_cases(
         .user_agent("news_lab/0.1")
         .build()?;
 
-    let hosts = discover_official_hosts(blip, &client).await?;
-    if hosts.is_empty() {
+    let host_discovery = discover_official_hosts(blip, &client).await?;
+    if host_discovery.hosts.is_empty() {
         let empty = empty_bundle(blip, policy);
-        put_bundle_cache(&cache_key, &empty);
+        if !host_discovery.search_degraded {
+            put_bundle_cache(&cache_key, &empty);
+        }
         return Ok(empty);
     }
 
-    let page_collection = collect_case_pages(blip, &hosts, &client).await?;
+    let page_collection = collect_case_pages(blip, &host_discovery.hosts, &client).await?;
     if page_collection.pages.is_empty() {
         let empty = empty_bundle(blip, policy);
-        if page_collection.fetched_pages > 0 {
+        if page_collection.fetched_pages > 0 && !host_discovery.search_degraded {
             put_bundle_cache(&cache_key, &empty);
         }
         return Ok(empty);
@@ -167,7 +174,9 @@ pub async fn fetch_enterprise_cases(
         fetched_at: Utc::now().format("%Y-%m-%d").to_string(),
         source_policy: policy.as_str().to_string(),
     };
-    put_bundle_cache(&cache_key, &bundle);
+    if !host_discovery.search_degraded {
+        put_bundle_cache(&cache_key, &bundle);
+    }
     Ok(bundle)
 }
 
@@ -192,7 +201,10 @@ fn put_bundle_cache(parts: &[&str], bundle: &BlipCaseBundle) {
     }
 }
 
-async fn discover_official_hosts(blip: &Blip, client: &reqwest::Client) -> Result<Vec<String>> {
+async fn discover_official_hosts(
+    blip: &Blip,
+    client: &reqwest::Client,
+) -> Result<OfficialHostDiscovery> {
     let mut hosts = Vec::new();
     let mut seen = HashSet::new();
 
@@ -205,7 +217,16 @@ async fn discover_official_hosts(blip: &Blip, client: &reqwest::Client) -> Resul
     }
 
     let query = format!("{} official website", blip.name);
-    let search_results = search_duckduckgo(&query, client).await?;
+    let search_results = match search_duckduckgo(&query, client).await {
+        Ok(results) => results,
+        Err(_) if !hosts.is_empty() => {
+            return Ok(OfficialHostDiscovery {
+                hosts,
+                search_degraded: true,
+            });
+        }
+        Err(err) => return Err(err),
+    };
     for result in search_results.into_iter().take(6) {
         if let Some(host) = url_host(&result.url) {
             if !is_excluded_host(&host)
@@ -217,7 +238,10 @@ async fn discover_official_hosts(blip: &Blip, client: &reqwest::Client) -> Resul
         }
     }
 
-    Ok(hosts)
+    Ok(OfficialHostDiscovery {
+        hosts,
+        search_degraded: false,
+    })
 }
 
 async fn github_homepage_host(repo: &str, client: &reqwest::Client) -> Option<String> {

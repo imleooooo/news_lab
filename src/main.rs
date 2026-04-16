@@ -888,7 +888,10 @@ fn render_analysis_sections(text: &str) {
 // ── Run: Terminal Radar ────────────────────────────────────────────────────────
 
 async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()> {
-    let cache_key = ["radar", kw];
+    let fetch_n = cfg.max_results.max(12);
+    let review_model =
+        std::env::var("REVIEW_MODEL").unwrap_or_else(|_| "gpt-5.4-2026-03-05".to_string());
+    let cache_key = ["radar", kw, &llm.model, &review_model, &fetch_n.to_string()];
     if let Some((cached, ttl)) =
         cache::get_with_ttl::<RadarCacheEntry>(&cache_key, RADAR_CACHE_TTL_SECS)
     {
@@ -897,7 +900,6 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
     }
 
     // Fetch radar signals (at least 12 items for better radar coverage)
-    let fetch_n = cfg.max_results.max(12);
     let spinner = Spinner::new(&format!("正在抓取技術資料：{}", kw));
     let items = fetch_radar_signals(kw, fetch_n).await;
     spinner.finish(&format!("取得 {} 筆資料", items.len()));
@@ -920,8 +922,6 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
     // Use REVIEW_MODEL env var if set, otherwise default to gpt-5.4-2026-03-05.
     // If the model is unavailable, review_and_augment() treats the failure as satisfied
     // and skips the round gracefully.
-    let review_model =
-        std::env::var("REVIEW_MODEL").unwrap_or_else(|_| "gpt-5.4-2026-03-05".to_string());
     let review_llm = LLMClient::new(&review_model)?;
     for round in 1..=2u8 {
         let spinner = Spinner::new(&format!(
