@@ -54,6 +54,7 @@ struct SearchResult {
 
 struct PageCollection {
     pages: String,
+    fetched_pages: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,7 +134,9 @@ pub async fn fetch_enterprise_cases(
     let page_collection = collect_case_pages(blip, &hosts, &client).await?;
     if page_collection.pages.is_empty() {
         let empty = empty_bundle(blip, policy);
-        put_bundle_cache(&cache_key, &empty);
+        if page_collection.fetched_pages > 0 {
+            put_bundle_cache(&cache_key, &empty);
+        }
         return Ok(empty);
     }
 
@@ -202,21 +205,15 @@ async fn discover_official_hosts(blip: &Blip, client: &reqwest::Client) -> Resul
     }
 
     let query = format!("{} official website", blip.name);
-    match search_duckduckgo(&query, client).await {
-        Ok(results) => {
-            for result in results.into_iter().take(6) {
-                if let Some(host) = url_host(&result.url) {
-                    if !is_excluded_host(&host)
-                        && title_matches_official_host(&result.title, &blip.name, &host)
-                        && seen.insert(host.clone())
-                    {
-                        hosts.push(host);
-                    }
-                }
+    for result in search_duckduckgo(&query, client).await?.into_iter().take(6) {
+        if let Some(host) = url_host(&result.url) {
+            if !is_excluded_host(&host)
+                && title_matches_official_host(&result.title, &blip.name, &host)
+                && seen.insert(host.clone())
+            {
+                hosts.push(host);
             }
         }
-        Err(err) if hosts.is_empty() => return Err(err),
-        Err(_) => {}
     }
 
     Ok(hosts)
@@ -247,29 +244,47 @@ async fn collect_case_pages(
     let mut candidate_urls = 0usize;
 
     for host in hosts.iter().take(3) {
-        let query = format!(
-            "site:{host} \"{name}\" (customer story OR case study OR success story OR customer)",
-            host = host,
-            name = blip.name
-        );
-        for result in search_duckduckgo(&query, client).await?.into_iter().take(5) {
-            if !host_matches(&result.url, host) || !seen_urls.insert(result.url.clone()) {
-                continue;
+        let homepage_url = format!("https://{host}");
+        if let Some(homepage) = fetch_doc_page(&homepage_url).await {
+            fetched_pages += 1;
+            if looks_like_case_page(&homepage.url, &homepage.title, &homepage.text, &blip.name) {
+                sections.push(format_case_section(&homepage, host));
             }
-            candidate_urls += 1;
-            let Some(page) = fetch_doc_page(&result.url).await else {
+            for url in candidate_case_urls_from_nav_links(&homepage_url, host, &homepage.nav_links)
+            {
+                if seen_urls.insert(url) {
+                    candidate_urls += 1;
+                }
+            }
+        }
+
+        for query in case_search_queries(host, &blip.name) {
+            for result in search_duckduckgo(&query, client).await?.into_iter().take(4) {
+                if !host_matches(&result.url, host) || !seen_urls.insert(result.url.clone()) {
+                    continue;
+                }
+                candidate_urls += 1;
+            }
+            if candidate_urls >= 12 {
+                break;
+            }
+        }
+
+        let candidate_list: Vec<String> = seen_urls
+            .iter()
+            .filter(|url| host_matches(url, host) && url.as_str() != homepage_url)
+            .cloned()
+            .collect();
+
+        for url in candidate_list {
+            let Some(page) = fetch_doc_page(&url).await else {
                 continue;
             };
             fetched_pages += 1;
-            if !looks_like_case_page(&page.title, &page.text, &blip.name) {
+            if !looks_like_case_page(&page.url, &page.title, &page.text, &blip.name) {
                 continue;
             }
-            let published = extract_date(&page.text).unwrap_or_default();
-            let snippet: String = page.text.chars().take(1_500).collect();
-            sections.push(format!(
-                "URL: {}\nTITLE: {}\nPUBLISHER: {}\nPUBLISHED_AT: {}\nTEXT:\n{}",
-                page.url, page.title, host, published, snippet
-            ));
+            sections.push(format_case_section(&page, host));
             if sections.len() >= 6 {
                 break;
             }
@@ -285,7 +300,86 @@ async fn collect_case_pages(
 
     Ok(PageCollection {
         pages: sections.join("\n\n---\n\n"),
+        fetched_pages,
     })
+}
+
+fn case_search_queries(host: &str, product_name: &str) -> Vec<String> {
+    let name = product_name.trim();
+    [
+        format!(
+            "site:{host} \"{name}\" (customer story OR customer stories OR case study OR case studies)"
+        ),
+        format!("site:{host} \"{name}\" (customers OR success story OR success stories)"),
+        format!("site:{host} \"{name}\" (users OR use case OR use cases OR testimonial)"),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn candidate_case_urls_from_nav_links(
+    base_url: &str,
+    host: &str,
+    nav_links: &[String],
+) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut seen = HashSet::new();
+
+    for href in nav_links {
+        if !looks_like_case_link(href) {
+            continue;
+        }
+        let Some(url) = resolve_internal_url(base_url, href) else {
+            continue;
+        };
+        if host_matches(&url, host) && seen.insert(url.clone()) {
+            urls.push(url);
+        }
+    }
+
+    urls
+}
+
+fn looks_like_case_link(href: &str) -> bool {
+    let href = href.to_lowercase();
+    [
+        "customer",
+        "customers",
+        "case-study",
+        "case-studies",
+        "case_study",
+        "case_studies",
+        "success-story",
+        "success-stories",
+        "stories",
+        "story",
+        "use-case",
+        "use-cases",
+        "users",
+        "testimonials",
+    ]
+    .iter()
+    .any(|kw| href.contains(kw))
+}
+
+fn resolve_internal_url(base_url: &str, href: &str) -> Option<String> {
+    if href.starts_with("https://") || href.starts_with("http://") {
+        return Some(href.to_string());
+    }
+    if href.starts_with("//") {
+        return Some(format!("https:{href}"));
+    }
+
+    let base = base_url.trim_end_matches('/');
+    if href.starts_with('/') {
+        return Some(format!("{base}{href}"));
+    }
+
+    if href.starts_with('#') || href.is_empty() {
+        return None;
+    }
+
+    Some(format!("{base}/{href}"))
 }
 
 fn search_error(query: &str, reason: &str) -> anyhow::Error {
@@ -338,13 +432,41 @@ fn decode_ddg_redirect(href: &str) -> String {
     href.to_string()
 }
 
-fn looks_like_case_page(title: &str, text: &str, product_name: &str) -> bool {
-    let combined = format!("{} {}", title.to_lowercase(), text.to_lowercase());
+fn looks_like_case_page(url: &str, title: &str, text: &str, product_name: &str) -> bool {
+    let combined = format!(
+        "{} {} {}",
+        url.to_lowercase(),
+        title.to_lowercase(),
+        text.to_lowercase()
+    );
     let has_product = combined.contains(&product_name.to_lowercase());
-    let has_case_signal = ["customer", "case study", "success story", "how ", "uses "]
-        .iter()
-        .any(|kw| combined.contains(kw));
+    let has_case_signal = [
+        "customer",
+        "customers",
+        "customer story",
+        "customer stories",
+        "case study",
+        "case studies",
+        "success story",
+        "success stories",
+        "testimonial",
+        "use case",
+        "use cases",
+        "uses ",
+        "used by",
+    ]
+    .iter()
+    .any(|kw| combined.contains(kw));
     has_product && has_case_signal
+}
+
+fn format_case_section(page: &crate::fetcher::docs::DocPage, publisher: &str) -> String {
+    let published = extract_date(&page.text).unwrap_or_default();
+    let snippet: String = page.text.chars().take(1_500).collect();
+    format!(
+        "URL: {}\nTITLE: {}\nPUBLISHER: {}\nPUBLISHED_AT: {}\nTEXT:\n{}",
+        page.url, page.title, publisher, published, snippet
+    )
 }
 
 fn extract_date(text: &str) -> Option<String> {
@@ -651,5 +773,59 @@ mod tests {
             extract_date("Published on 2025/03/12 by vendor"),
             Some("2025-03-12".to_string())
         );
+    }
+
+    #[test]
+    fn case_search_queries_cover_common_case_terms() {
+        let queries = case_search_queries("example.com", "Redis");
+
+        assert_eq!(queries.len(), 3);
+        assert!(queries.iter().any(|q| q.contains("customer stories")));
+        assert!(queries.iter().any(|q| q.contains("case studies")));
+        assert!(queries.iter().any(|q| q.contains("use cases")));
+    }
+
+    #[test]
+    fn resolve_internal_url_supports_relative_and_root_links() {
+        assert_eq!(
+            resolve_internal_url("https://example.com", "/customers/acme"),
+            Some("https://example.com/customers/acme".to_string())
+        );
+        assert_eq!(
+            resolve_internal_url("https://example.com", "case-studies/acme"),
+            Some("https://example.com/case-studies/acme".to_string())
+        );
+    }
+
+    #[test]
+    fn candidate_case_urls_from_nav_links_keeps_case_like_paths() {
+        let urls = candidate_case_urls_from_nav_links(
+            "https://example.com",
+            "example.com",
+            &[
+                "/pricing".to_string(),
+                "/customers".to_string(),
+                "https://example.com/case-studies/acme".to_string(),
+                "https://other.com/customers".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.com/customers".to_string(),
+                "https://example.com/case-studies/acme".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn case_page_detection_accepts_common_plural_signals() {
+        assert!(looks_like_case_page(
+            "https://example.com/customers",
+            "Customer Stories",
+            "Redis customer stories from enterprise teams",
+            "Redis"
+        ));
     }
 }
