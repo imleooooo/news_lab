@@ -342,16 +342,55 @@ pub async fn fetch_tech_news(kw: &str, max: usize) -> Vec<NewsItem> {
 pub async fn fetch_radar_signals(kw: &str, max: usize) -> Vec<RadarSignal> {
     let stable_max = (max as f64 * 0.7).ceil() as usize;
     let emerging_max = max.saturating_sub(stable_max).max(1);
+    let hn_max = max.min(6).max(1);
 
-    let (stable, emerging) = tokio::join!(
+    let (stable, emerging, hn) = tokio::join!(
         fetch_github(kw, stable_max.max(1)),
-        fetch_github_emerging(kw, emerging_max)
+        fetch_github_emerging(kw, emerging_max),
+        fetch_hackernews(kw, hn_max)
     );
 
+    let github_items = interleave_news_items(emerging, stable);
+    let mut combined = news_items_to_radar_signals(github_items);
+
+    if combined.is_empty() {
+        combined = news_items_to_radar_signals(hn);
+    }
+
+    combined.truncate(max);
+    combined
+}
+
+fn interleave_news_items(primary: Vec<NewsItem>, secondary: Vec<NewsItem>) -> Vec<NewsItem> {
+    let mut primary = primary.into_iter();
+    let mut secondary = secondary.into_iter();
+    let mut merged = Vec::new();
+
+    loop {
+        let mut added = false;
+
+        if let Some(item) = primary.next() {
+            merged.push(item);
+            added = true;
+        }
+        if let Some(item) = secondary.next() {
+            merged.push(item);
+            added = true;
+        }
+
+        if !added {
+            break;
+        }
+    }
+
+    merged
+}
+
+fn news_items_to_radar_signals(items: Vec<NewsItem>) -> Vec<RadarSignal> {
     let mut seen = std::collections::HashSet::new();
-    let mut combined: Vec<RadarSignal> = stable
+
+    items
         .into_iter()
-        .chain(emerging)
         .filter_map(|item| {
             let key = item.title.to_lowercase();
             if !seen.insert(key) {
@@ -364,10 +403,7 @@ pub async fn fetch_radar_signals(kw: &str, max: usize) -> Vec<RadarSignal> {
                 summary: item.description,
             })
         })
-        .collect();
-
-    combined.truncate(max);
-    combined
+        .collect()
 }
 
 fn urlencoding(s: &str) -> String {
@@ -439,6 +475,59 @@ async fn retry_get_text(client: &reqwest::Client, url: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(title: &str, source: &str) -> NewsItem {
+        NewsItem {
+            title: title.to_string(),
+            url: format!("https://example.com/{title}"),
+            source: source.to_string(),
+            published: None,
+            description: format!("{source} summary"),
+        }
+    }
+
+    #[test]
+    fn interleave_news_items_prioritizes_primary_stream() {
+        let emerging = vec![item("emerging-1", "GitHub"), item("emerging-2", "GitHub")];
+        let stable = vec![
+            item("stable-1", "GitHub"),
+            item("stable-2", "GitHub"),
+            item("stable-3", "GitHub"),
+        ];
+
+        let titles: Vec<String> = interleave_news_items(emerging, stable)
+            .into_iter()
+            .map(|item| item.title)
+            .collect();
+
+        assert_eq!(
+            titles,
+            vec![
+                "emerging-1",
+                "stable-1",
+                "emerging-2",
+                "stable-2",
+                "stable-3"
+            ]
+        );
+    }
+
+    #[test]
+    fn news_items_to_radar_signals_deduplicates_by_title() {
+        let signals = news_items_to_radar_signals(vec![
+            item("RepoX", "GitHub"),
+            item("repox", "Hacker News"),
+            item("RepoY", "GitHub"),
+        ]);
+
+        let titles: Vec<String> = signals.into_iter().map(|item| item.title).collect();
+        assert_eq!(titles, vec!["RepoX", "RepoY"]);
+    }
 }
 
 // ── RSS Feed Parser ─────────────────────────────────────────────────────────────
