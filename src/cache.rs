@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -16,9 +16,9 @@ pub struct DisplayItem {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Entry {
+struct Entry<T> {
     created_at: u64,
-    items: Vec<DisplayItem>,
+    payload: T,
 }
 
 fn cache_dir() -> PathBuf {
@@ -58,17 +58,22 @@ fn now_secs() -> u64 {
 
 /// Return cached items and remaining TTL (seconds), or `None` on miss / expiry.
 pub fn get(parts: &[&str]) -> Option<(Vec<DisplayItem>, u64)> {
+    get_with_ttl(parts, TTL_SECS)
+}
+
+/// Return cached payload and remaining TTL (seconds), or `None` on miss / expiry.
+pub fn get_with_ttl<T: DeserializeOwned>(parts: &[&str], ttl_secs: u64) -> Option<(T, u64)> {
     let path = cache_path(parts);
     let text = std::fs::read_to_string(&path).ok()?;
-    let entry: Entry = serde_json::from_str(&text).ok()?;
+    let entry: Entry<T> = serde_json::from_str(&text).ok()?;
 
     let age = now_secs().saturating_sub(entry.created_at);
-    if age >= TTL_SECS {
+    if age >= ttl_secs {
         let _ = std::fs::remove_file(&path); // clean up expired file
         return None;
     }
 
-    Some((entry.items, TTL_SECS - age))
+    Some((entry.payload, ttl_secs - age))
 }
 
 /// Delete all cached `.json` entries. Returns the number of files removed.
@@ -90,11 +95,16 @@ pub fn clear_all() -> usize {
 
 /// Write items to cache (silently ignores write errors).
 pub fn put(parts: &[&str], items: &[DisplayItem]) {
+    put_with_ttl(parts, items, TTL_SECS);
+}
+
+/// Write payload to cache with a custom TTL (silently ignores write errors).
+pub fn put_with_ttl<T: Serialize + ?Sized>(parts: &[&str], payload: &T, _ttl_secs: u64) {
     let dir = cache_dir();
     let _ = std::fs::create_dir_all(&dir);
     let entry = Entry {
         created_at: now_secs(),
-        items: items.to_vec(),
+        payload,
     };
     if let Ok(json) = serde_json::to_string_pretty(&entry) {
         let _ = std::fs::write(cache_path(parts), json);

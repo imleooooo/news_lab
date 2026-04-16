@@ -26,6 +26,8 @@ use fetcher::{
 use inquire::{validator::Validation, Select, Text};
 use llm::LLMClient;
 use radar::{check_oss_activity, extract_blips, review_and_augment, terminal as radar_terminal};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use summarizer::{
     analyze_competition, summarize_arxiv, summarize_cncf_project, summarize_docs,
     summarize_hf_model, summarize_one, summarize_podcast, summarize_release, CompetitorRow,
@@ -86,6 +88,24 @@ fn show_cached(items: &[cache::DisplayItem], ttl_secs: u64) -> bool {
         separator();
     }
     true
+}
+
+fn show_cache_hit(ttl_secs: u64) {
+    let mins = ttl_secs / 60;
+    println!(
+        "  {} 快取命中（還有 {} 分鐘到期）",
+        style("✓").green(),
+        mins,
+    );
+    separator();
+}
+
+const RADAR_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+
+#[derive(Serialize, Deserialize)]
+struct RadarCacheEntry {
+    q_names: HashMap<String, String>,
+    blips: Vec<radar::Blip>,
 }
 
 // ── Banner ─────────────────────────────────────────────────────────────────────
@@ -868,6 +888,14 @@ fn render_analysis_sections(text: &str) {
 // ── Run: Terminal Radar ────────────────────────────────────────────────────────
 
 async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()> {
+    let cache_key = ["radar", kw];
+    if let Some((cached, ttl)) =
+        cache::get_with_ttl::<RadarCacheEntry>(&cache_key, RADAR_CACHE_TTL_SECS)
+    {
+        show_cache_hit(ttl);
+        return run_radar_browser(kw, cached.q_names, cached.blips, llm).await;
+    }
+
     // Fetch radar signals (at least 12 items for better radar coverage)
     let fetch_n = cfg.max_results.max(12);
     let spinner = Spinner::new(&format!("正在抓取技術資料：{}", kw));
@@ -923,6 +951,24 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
     check_oss_activity(&mut blips).await;
     spinner.finish("");
 
+    cache::put_with_ttl(
+        &cache_key,
+        &RadarCacheEntry {
+            q_names: q_names.clone(),
+            blips: blips.clone(),
+        },
+        RADAR_CACHE_TTL_SECS,
+    );
+
+    run_radar_browser(kw, q_names, blips, llm).await
+}
+
+async fn run_radar_browser(
+    kw: &str,
+    q_names: HashMap<String, String>,
+    mut blips: Vec<radar::Blip>,
+    llm: &LLMClient,
+) -> Result<()> {
     // Build grid and assign blip numbers
     let rg = radar_terminal::build_radar_grid(&mut blips, &q_names);
 
