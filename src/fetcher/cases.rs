@@ -205,7 +205,12 @@ async fn discover_official_hosts(blip: &Blip, client: &reqwest::Client) -> Resul
     }
 
     let query = format!("{} official website", blip.name);
-    for result in search_duckduckgo(&query, client).await?.into_iter().take(6) {
+    let search_results = match search_duckduckgo(&query, client).await {
+        Ok(results) => results,
+        Err(_) if !hosts.is_empty() => return Ok(hosts),
+        Err(err) => return Err(err),
+    };
+    for result in search_results.into_iter().take(6) {
         if let Some(host) = url_host(&result.url) {
             if !is_excluded_host(&host)
                 && title_matches_official_host(&result.title, &blip.name, &host)
@@ -241,9 +246,10 @@ async fn collect_case_pages(
     let mut sections = Vec::new();
     let mut seen_urls = HashSet::new();
     let mut fetched_pages = 0usize;
-    let mut candidate_urls = 0usize;
+    let mut total_candidate_urls = 0usize;
 
     for host in hosts.iter().take(3) {
+        let mut host_candidate_urls = 0usize;
         let homepage_url = format!("https://{host}");
         if let Some(homepage) = fetch_doc_page(&homepage_url).await {
             fetched_pages += 1;
@@ -253,7 +259,8 @@ async fn collect_case_pages(
             for url in candidate_case_urls_from_nav_links(&homepage_url, host, &homepage.nav_links)
             {
                 if seen_urls.insert(url) {
-                    candidate_urls += 1;
+                    total_candidate_urls += 1;
+                    host_candidate_urls += 1;
                 }
             }
         }
@@ -263,9 +270,10 @@ async fn collect_case_pages(
                 if !host_matches(&result.url, host) || !seen_urls.insert(result.url.clone()) {
                     continue;
                 }
-                candidate_urls += 1;
+                total_candidate_urls += 1;
+                host_candidate_urls += 1;
             }
-            if candidate_urls >= 12 {
+            if host_candidate_urls >= 12 {
                 break;
             }
         }
@@ -294,7 +302,7 @@ async fn collect_case_pages(
         }
     }
 
-    if candidate_urls > 0 && fetched_pages == 0 {
+    if total_candidate_urls > 0 && fetched_pages == 0 {
         return Err(anyhow!("無法抓取企業案例候選頁面"));
     }
 

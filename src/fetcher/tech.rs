@@ -329,16 +329,31 @@ pub async fn fetch_radar_signals(kw: &str, max: usize) -> Vec<RadarSignal> {
     let stable_max = (max as f64 * 0.7).ceil() as usize;
     let emerging_max = max.saturating_sub(stable_max).max(1);
 
-    let (stable, emerging) = tokio::join!(
+    let (stable, emerging, initial_hn) = tokio::join!(
         fetch_github(kw, stable_max.max(1)),
-        fetch_github_emerging(kw, emerging_max)
+        fetch_github_emerging(kw, emerging_max),
+        fetch_hackernews(kw, max)
     );
 
     let github_items = interleave_news_items(emerging, stable);
     let github_unique = count_unique_titles(&github_items);
-    let hn_needed = max.saturating_sub(github_unique);
-    let hn = fetch_hackernews_backfill(kw, hn_needed, &github_items).await;
-    let merged_items = append_news_items(github_items, hn);
+
+    let mut seen_titles: std::collections::HashSet<String> = github_items
+        .iter()
+        .map(|item| title_key(&item.title))
+        .collect();
+    let initial_hn = collect_unique_news_items_by_title(
+        initial_hn,
+        &mut seen_titles,
+        max.saturating_sub(github_unique),
+    );
+
+    let mut merged_items = append_news_items(github_items, initial_hn);
+    let hn_needed = max.saturating_sub(count_unique_titles(&merged_items));
+    if hn_needed > 0 {
+        let hn = fetch_hackernews_backfill(kw, hn_needed, &merged_items).await;
+        merged_items = append_news_items(merged_items, hn);
+    }
     let mut combined = news_items_to_radar_signals(merged_items);
 
     combined.truncate(max);
