@@ -54,7 +54,6 @@ struct SearchResult {
 
 struct PageCollection {
     pages: String,
-    fetched_pages: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,9 +133,7 @@ pub async fn fetch_enterprise_cases(
     let page_collection = collect_case_pages(blip, &hosts, &client).await?;
     if page_collection.pages.is_empty() {
         let empty = empty_bundle(blip, policy);
-        if page_collection.fetched_pages > 0 {
-            put_bundle_cache(&cache_key, &empty);
-        }
+        put_bundle_cache(&cache_key, &empty);
         return Ok(empty);
     }
 
@@ -205,19 +202,21 @@ async fn discover_official_hosts(blip: &Blip, client: &reqwest::Client) -> Resul
     }
 
     let query = format!("{} official website", blip.name);
-    for result in search_duckduckgo(&query, client)
-        .await?
-        .into_iter()
-        .take(6)
-    {
-        if let Some(host) = url_host(&result.url) {
-            if !is_excluded_host(&host)
-                && title_matches_official_host(&result.title, &blip.name, &host)
-                && seen.insert(host.clone())
-            {
-                hosts.push(host);
+    match search_duckduckgo(&query, client).await {
+        Ok(results) => {
+            for result in results.into_iter().take(6) {
+                if let Some(host) = url_host(&result.url) {
+                    if !is_excluded_host(&host)
+                        && title_matches_official_host(&result.title, &blip.name, &host)
+                        && seen.insert(host.clone())
+                    {
+                        hosts.push(host);
+                    }
+                }
             }
         }
+        Err(err) if hosts.is_empty() => return Err(err),
+        Err(_) => {}
     }
 
     Ok(hosts)
@@ -253,11 +252,7 @@ async fn collect_case_pages(
             host = host,
             name = blip.name
         );
-        for result in search_duckduckgo(&query, client)
-            .await?
-            .into_iter()
-            .take(5)
-        {
+        for result in search_duckduckgo(&query, client).await?.into_iter().take(5) {
             if !host_matches(&result.url, host) || !seen_urls.insert(result.url.clone()) {
                 continue;
             }
@@ -290,7 +285,6 @@ async fn collect_case_pages(
 
     Ok(PageCollection {
         pages: sections.join("\n\n---\n\n"),
-        fetched_pages,
     })
 }
 
@@ -394,18 +388,52 @@ fn host_brand_label(host: &str) -> String {
         .unwrap_or(host)
         .trim_start_matches("www.");
     let labels: Vec<&str> = host.split('.').collect();
-    for label in labels.iter().rev().skip(1) {
-        if !matches!(
-            *label,
-            "www" | "docs" | "doc" | "blog" | "help" | "support" | "home"
-        ) {
+
+    if labels.len() >= 2 {
+        let suffix_len = public_suffix_len(&labels);
+        if labels.len() > suffix_len {
+            let registrable = labels[labels.len() - suffix_len - 1];
+            let normalized = normalize_text(registrable);
+            if !normalized.is_empty() {
+                return normalized;
+            }
+        }
+    }
+
+    for label in labels {
+        if !is_generic_host_label(label) {
             return normalize_text(label);
         }
     }
-    labels
-        .first()
-        .map(|s| normalize_text(s))
-        .unwrap_or_default()
+
+    String::new()
+}
+
+fn public_suffix_len(labels: &[&str]) -> usize {
+    let last = labels.last().copied().unwrap_or_default();
+    let second_last = labels
+        .get(labels.len().saturating_sub(2))
+        .copied()
+        .unwrap_or_default();
+
+    if last.len() == 2
+        && matches!(
+            second_last,
+            "ac" | "co" | "com" | "edu" | "gov" | "mil" | "net" | "org"
+        )
+        && labels.len() >= 3
+    {
+        2
+    } else {
+        1
+    }
+}
+
+fn is_generic_host_label(label: &str) -> bool {
+    matches!(
+        label,
+        "www" | "docs" | "doc" | "blog" | "help" | "support" | "home"
+    )
 }
 
 fn is_excluded_host(host: &str) -> bool {
@@ -604,6 +632,17 @@ mod tests {
             "ChatGPT Enterprise",
             "openai.com"
         ));
+    }
+
+    #[test]
+    fn host_brand_label_uses_registrable_domain_for_cc_tlds() {
+        assert_eq!(host_brand_label("vendor.co.uk"), "vendor");
+        assert_eq!(host_brand_label("docs.vendor.com.au"), "vendor");
+    }
+
+    #[test]
+    fn host_brand_label_skips_generic_subdomains() {
+        assert_eq!(host_brand_label("support.docs.openai.com"), "openai");
     }
 
     #[test]
