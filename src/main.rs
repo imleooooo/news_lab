@@ -25,7 +25,10 @@ use fetcher::{
 };
 use inquire::{validator::Validation, Select, Text};
 use llm::LLMClient;
-use radar::{check_oss_activity, extract_blips, review_and_augment, terminal as radar_terminal};
+use radar::{
+    check_oss_activity, extract_blips, review_and_augment, terminal as radar_terminal,
+    ReviewOutcome,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use summarizer::{
@@ -918,38 +921,60 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
         return Ok(());
     }
 
-    // Review loop: advanced model audits and augments, up to 2 rounds
+    // Review loop: advanced model audits and augments, up to 2 rounds.
     // Use REVIEW_MODEL env var if set, otherwise default to gpt-5.4-2026-03-05.
-    // If the model is unavailable, review_and_augment() treats the failure as satisfied
-    // and skips the round gracefully.
     let review_llm = LLMClient::new(&review_model)?;
     for round in 1..=2u8 {
         let spinner = Spinner::new(&format!(
             "進階模型審核雷達圖（第 {}/2 輪，{}）...",
             round, review_model
         ));
-        let satisfied = review_and_augment(&mut blips, &q_names, kw, &review_llm).await;
-        if satisfied {
-            spinner.finish(&format!(
-                "第 {} 輪審核通過，共 {} 個項目",
-                round,
-                blips.len()
-            ));
-            break;
+        match review_and_augment(&mut blips, &q_names, kw, &review_llm).await {
+            ReviewOutcome::Satisfied => {
+                spinner.finish(&format!(
+                    "第 {} 輪審核通過，共 {} 個項目",
+                    round,
+                    blips.len()
+                ));
+                break;
+            }
+            ReviewOutcome::Augmented => {
+                spinner.finish(&format!(
+                    "第 {} 輪補充完成，現有 {} 個項目",
+                    round,
+                    blips.len()
+                ));
+            }
+            ReviewOutcome::Skipped { reason } => {
+                spinner.finish(&format!("第 {} 輪審核失敗，已跳過", round));
+                panel(
+                    "技術雷達",
+                    &format!(
+                        "進階審核未執行成功，雷達圖將直接使用初步結果。\n原因：{}",
+                        reason
+                    ),
+                    "red",
+                );
+                break;
+            }
         }
-        spinner.finish(&format!(
-            "第 {} 輪補充完成，現有 {} 個項目",
-            round,
-            blips.len()
-        ));
     }
 
     print_usage(&review_llm);
 
     // GitHub activity check for open-source blips
     let spinner = Spinner::new("檢查開源專案 GitHub 活躍度...");
-    check_oss_activity(&mut blips).await;
-    spinner.finish("");
+    let activity_complete = check_oss_activity(&mut blips).await;
+    if activity_complete {
+        spinner.finish("");
+    } else {
+        spinner.finish("GitHub API 限速，已跳過本輪活躍度降級");
+        panel(
+            "技術雷達",
+            "GitHub Search API 已限速，為避免只讓前半段專案被降級，本輪未套用任何 GitHub 活躍度修正。",
+            "yellow",
+        );
+    }
 
     cache::put_with_ttl(
         &cache_key,

@@ -319,7 +319,7 @@ fn deduplicate(blips: Vec<Blip>) -> Vec<Blip> {
 
 // ── GitHub OSS activity check ──────────────────────────────────────────────────
 
-pub async fn check_oss_activity(blips: &mut [Blip]) {
+pub async fn check_oss_activity(blips: &mut [Blip]) -> bool {
     let token = std::env::var("GITHUB_TOKEN").ok();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -327,7 +327,18 @@ pub async fn check_oss_activity(blips: &mut [Blip]) {
         .build()
         .unwrap_or_default();
 
-    for blip in blips.iter_mut() {
+    struct ActivityUpdate {
+        index: usize,
+        github_repo: String,
+        github_days: i64,
+        ring: String,
+        rationale_suffix: Option<String>,
+    }
+
+    let mut pending = Vec::new();
+    let mut rate_limited = false;
+
+    for (index, blip) in blips.iter().enumerate() {
         if !blip.is_open_source || blip.name.is_empty() {
             continue;
         }
@@ -345,6 +356,10 @@ pub async fn check_oss_activity(blips: &mut [Blip]) {
         }
         let Ok(resp) = req.send().await else { continue };
         if resp.status() == 403 {
+            warn!(
+                "[radar] GitHub Search API rate limited while checking OSS activity; discard partial maturity adjustments for fairness"
+            );
+            rate_limited = true;
             break;
         } // rate limited
         let Ok(data) = resp.json::<serde_json::Value>().await else {
@@ -394,28 +409,53 @@ pub async fn check_oss_activity(blips: &mut [Blip]) {
         };
         let days = (Utc::now() - last_push).num_days();
 
-        blip.github_repo = repo["full_name"].as_str().unwrap_or("").to_string();
-        blip.github_days = Some(days);
-
         let old = blip.ring.clone();
-        if days > 365 {
-            blip.ring = downgrade_ring(&old, 2);
-            blip.rationale = format!(
-                "{}\n⚠️ GitHub 最後更新 {} 天前，活躍度極低，從 {} 下調兩級。",
-                blip.rationale,
-                days,
-                old.to_uppercase()
-            );
+        let (ring, rationale_suffix) = if days > 365 {
+            (
+                downgrade_ring(&old, 2),
+                Some(format!(
+                    "\n⚠️ GitHub 最後更新 {} 天前，活躍度極低，從 {} 下調兩級。",
+                    days,
+                    old.to_uppercase()
+                )),
+            )
         } else if days > 180 {
-            blip.ring = downgrade_ring(&old, 1);
-            blip.rationale = format!(
-                "{}\n⚠️ GitHub 最後更新 {} 天前，活躍度偏低，從 {} 下調一級。",
-                blip.rationale,
-                days,
-                old.to_uppercase()
-            );
+            (
+                downgrade_ring(&old, 1),
+                Some(format!(
+                    "\n⚠️ GitHub 最後更新 {} 天前，活躍度偏低，從 {} 下調一級。",
+                    days,
+                    old.to_uppercase()
+                )),
+            )
+        } else {
+            (old, None)
+        };
+
+        pending.push(ActivityUpdate {
+            index,
+            github_repo: repo["full_name"].as_str().unwrap_or("").to_string(),
+            github_days: days,
+            ring,
+            rationale_suffix,
+        });
+    }
+
+    if rate_limited {
+        return false;
+    }
+
+    for update in pending {
+        let blip = &mut blips[update.index];
+        blip.github_repo = update.github_repo;
+        blip.github_days = Some(update.github_days);
+        blip.ring = update.ring;
+        if let Some(suffix) = update.rationale_suffix {
+            blip.rationale.push_str(&suffix);
         }
     }
+
+    true
 }
 
 fn downgrade_ring(ring: &str, steps: usize) -> String {
@@ -502,11 +542,7 @@ pub async fn extract_blips(
     };
 
     // Normalize ring/quadrant to lowercase
-    let mut blips: Vec<Blip> = parsed
-        .blips
-        .into_iter()
-        .map(normalize_blip)
-        .collect();
+    let mut blips: Vec<Blip> = parsed.blips.into_iter().map(normalize_blip).collect();
 
     blips = deduplicate(blips);
 
@@ -576,12 +612,18 @@ struct ReviewResponse {
 
 /// Asks the review LLM to evaluate and optionally augment the blip list.
 /// Returns `true` if the LLM is satisfied (no additions needed).
+pub enum ReviewOutcome {
+    Satisfied,
+    Augmented,
+    Skipped { reason: String },
+}
+
 pub async fn review_and_augment(
     blips: &mut Vec<Blip>,
     q_names: &HashMap<String, String>,
     kw: &str,
     review_llm: &LLMClient,
-) -> bool {
+) -> ReviewOutcome {
     let today = Utc::now().format("%Y-%m-%d").to_string();
 
     let blips_summary: String = blips
@@ -625,7 +667,9 @@ pub async fn review_and_augment(
         Ok(r) => r,
         Err(e) => {
             warn!("[review] LLM 呼叫失敗: {e}");
-            return true; // treat as satisfied on error
+            return ReviewOutcome::Skipped {
+                reason: format!("LLM 呼叫失敗: {e}"),
+            };
         }
     };
 
@@ -634,32 +678,30 @@ pub async fn review_and_augment(
         Ok(r) => r,
         Err(e) => {
             warn!("[review] JSON 解析失敗: {e}");
-            return true;
+            return ReviewOutcome::Skipped {
+                reason: format!("JSON 解析失敗: {e}"),
+            };
         }
     };
 
     if parsed.satisfied || parsed.blips.is_empty() {
-        return true;
+        return ReviewOutcome::Satisfied;
     }
 
     info!("[review] 補充原因: {}", parsed.reason);
 
     // Normalize and merge new blips
-    let new_blips: Vec<Blip> = parsed
-        .blips
-        .into_iter()
-        .map(normalize_blip)
-        .collect();
+    let new_blips: Vec<Blip> = parsed.blips.into_iter().map(normalize_blip).collect();
 
     blips.extend(new_blips);
     *blips = deduplicate(std::mem::take(blips));
 
-    false
+    ReviewOutcome::Augmented
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_key, deduplicate, normalize_blip, Blip};
+    use super::{canonical_key, deduplicate, downgrade_ring, normalize_blip, Blip};
 
     fn blip(name: &str, ring: &str) -> Blip {
         Blip {
@@ -755,5 +797,11 @@ mod tests {
         let deduped = deduplicate(vec![normalize_blip(framework), normalize_blip(tool)]);
 
         assert_eq!(deduped.len(), 2);
+    }
+
+    #[test]
+    fn downgrade_ring_stops_at_hold() {
+        assert_eq!(downgrade_ring("assess", 2), "hold");
+        assert_eq!(downgrade_ring("hold", 1), "hold");
     }
 }
