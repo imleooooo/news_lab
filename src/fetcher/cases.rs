@@ -205,11 +205,7 @@ async fn discover_official_hosts(blip: &Blip, client: &reqwest::Client) -> Resul
     }
 
     let query = format!("{} official website", blip.name);
-    let search_results = match search_duckduckgo(&query, client).await {
-        Ok(results) => results,
-        Err(_) if !hosts.is_empty() => return Ok(hosts),
-        Err(err) => return Err(err),
-    };
+    let search_results = search_duckduckgo(&query, client).await?;
     for result in search_results.into_iter().take(6) {
         if let Some(host) = url_host(&result.url) {
             if !is_excluded_host(&host)
