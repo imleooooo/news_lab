@@ -14,6 +14,10 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Blip {
     pub name: String,
+    #[serde(default)]
+    pub canonical_name: String,
+    #[serde(default)]
+    pub kind: String,
     /// "q1" | "q2" | "q3" | "q4"
     pub quadrant: String,
     /// "adopt" | "trial" | "assess" | "hold"
@@ -89,6 +93,8 @@ const RADAR_PROMPT: &str = r#"你是一位技術生態系統分析師。今天�
   "blips": [
     {
       "name": "ToolX",
+      "canonical_name": "toolx",
+      "kind": "tool",
       "quadrant": "q2",
       "ring": "adopt",
       "is_open_source": true,
@@ -106,6 +112,8 @@ const RADAR_PROMPT: &str = r#"你是一位技術生態系統分析師。今天�
 命名規則（⚠️ 嚴格遵守）：
 - 同一產品系列只能出現一次，版本號以最新版為準
 - name 用英文或常見縮寫，≤20 字元
+- canonical_name 必填，使用穩定英文名或系列名，不含版本號、空白或標點
+- kind 必填，只能是 language/framework/library/tool/platform/database/model/service/technique/method 其中之一
 - 4 個環形都要有項目，blips 數量：15–40 個
 - 開源/閉源要準確（GitHub 有 repo 的為開源，API-only 的為閉源）
 - quadrant 欄位只能填 q1 / q2 / q3 / q4
@@ -185,11 +193,35 @@ fn key(name: &str) -> String {
         .to_lowercase()
 }
 
+fn canonicalize_key(key: &str) -> &str {
+    match key {
+        "k8s" => "kubernetes",
+        "postgresql" => "postgres",
+        "postgre" => "postgres",
+        "golang" => "go",
+        "dotnet" => "net",
+        "dotnetcore" => "net",
+        "mssql" => "sqlserver",
+        _ => key,
+    }
+}
+
+fn canonical_key(name: &str) -> String {
+    canonicalize_key(&key(name)).to_string()
+}
+
 fn tokens(name: &str) -> std::collections::HashSet<String> {
     let stopwords = ["&", "and", "the", "by", "for"];
     name.split([' ', '.', '-', '_'])
         .map(|t| t.to_lowercase())
         .filter(|t| !t.is_empty() && !stopwords.contains(&t.as_str()))
+        .collect()
+}
+
+fn canonical_tokens(name: &str) -> std::collections::HashSet<String> {
+    tokens(name)
+        .into_iter()
+        .map(|t| canonicalize_key(&t).to_string())
         .collect()
 }
 
@@ -203,21 +235,70 @@ fn ring_rank(ring: &str) -> usize {
     }
 }
 
+fn normalize_kind(kind: &str) -> String {
+    let normalized = kind.trim().to_lowercase();
+    match normalized.as_str() {
+        "language" | "framework" | "library" | "tool" | "platform" | "database" | "model"
+        | "service" | "technique" | "method" => normalized,
+        _ => String::new(),
+    }
+}
+
+fn normalize_blip(mut b: Blip) -> Blip {
+    b.name = b.name.trim().to_string();
+    b.ring = b.ring.to_lowercase().trim().to_string();
+    b.quadrant = b.quadrant.to_lowercase().trim().to_string();
+    b.canonical_name = b.canonical_name.trim().to_string();
+    if b.canonical_name.is_empty() {
+        b.canonical_name = canonical_key(&b.name);
+    } else {
+        b.canonical_name = canonical_key(&b.canonical_name);
+    }
+    b.kind = normalize_kind(&b.kind);
+
+    if !["adopt", "trial", "assess", "hold"].contains(&b.ring.as_str()) {
+        b.ring = "assess".to_string();
+    }
+    if !["q1", "q2", "q3", "q4"].contains(&b.quadrant.as_str()) {
+        b.quadrant = "q1".to_string();
+    }
+    b
+}
+
+fn effective_canonical_name(blip: &Blip) -> String {
+    if blip.canonical_name.trim().is_empty() {
+        canonical_key(&blip.name)
+    } else {
+        canonical_key(&blip.canonical_name)
+    }
+}
+
+fn effective_kind(blip: &Blip) -> String {
+    normalize_kind(&blip.kind)
+}
+
 fn deduplicate(blips: Vec<Blip>) -> Vec<Blip> {
     let mut kept: Vec<Blip> = Vec::new();
 
     for candidate in blips {
-        let ck = key(&candidate.name);
-        let ct = tokens(&candidate.name);
+        let ck = effective_canonical_name(&candidate);
+        let ct = canonical_tokens(&candidate.name);
+        let ckind = effective_kind(&candidate);
         let mut merged = false;
 
         for existing in kept.iter_mut() {
-            let ek = key(&existing.name);
-            let et = tokens(&existing.name);
+            let ek = effective_canonical_name(existing);
+            let et = canonical_tokens(&existing.name);
+            let ekind = effective_kind(existing);
 
-            let is_dup = ck.starts_with(&ek)
-                || ek.starts_with(&ck)
-                || (!ct.is_empty() && !et.is_empty() && (ct.is_subset(&et) || et.is_subset(&ct)));
+            if !ckind.is_empty() && !ekind.is_empty() && ckind != ekind {
+                continue;
+            }
+
+            // Only merge when canonicalized names are identical or their canonical token
+            // sets match exactly. This catches known aliases such as k8s/Kubernetes while
+            // keeping distinct technologies like Java/JavaScript or Redis/RedisInsight apart.
+            let is_dup = ck == ek || (!ct.is_empty() && ct == et);
 
             if is_dup {
                 let c_rank = ring_rank(&candidate.ring);
@@ -424,18 +505,7 @@ pub async fn extract_blips(
     let mut blips: Vec<Blip> = parsed
         .blips
         .into_iter()
-        .map(|mut b| {
-            b.ring = b.ring.to_lowercase().trim().to_string();
-            b.quadrant = b.quadrant.to_lowercase().trim().to_string();
-            // Validate values
-            if !["adopt", "trial", "assess", "hold"].contains(&b.ring.as_str()) {
-                b.ring = "assess".to_string();
-            }
-            if !["q1", "q2", "q3", "q4"].contains(&b.quadrant.as_str()) {
-                b.quadrant = "q1".to_string();
-            }
-            b
-        })
+        .map(normalize_blip)
         .collect();
 
     blips = deduplicate(blips);
@@ -469,6 +539,8 @@ const REVIEW_PROMPT: &str = r#"你是一位技術生態系統審核專家。今�
   "blips": [
     {
       "name": "ToolX",
+      "canonical_name": "toolx",
+      "kind": "tool",
       "quadrant": "q2",
       "ring": "adopt",
       "is_open_source": true,
@@ -486,6 +558,8 @@ const REVIEW_PROMPT: &str = r#"你是一位技術生態系統審核專家。今�
 規則：
 - 只新增真正缺漏的重要項目（3–10 個）
 - quadrant 只填 q1/q2/q3/q4，ring 只填 adopt/trial/assess/hold（全小寫）
+- canonical_name 必填，使用穩定英文名或系列名，不含版本號、空白或標點
+- kind 必填，只能是 language/framework/library/tool/platform/database/model/service/technique/method 其中之一
 - name ≤20 字元，只回傳 JSON，不加任何其他文字"#;
 
 // ── Review response ─────────────────────────────────────────────────────────────
@@ -514,9 +588,15 @@ pub async fn review_and_augment(
         .iter()
         .map(|b| {
             let oss = if b.is_open_source { "開源" } else { "閉源" };
+            let kind = if b.kind.is_empty() {
+                "unknown"
+            } else {
+                b.kind.as_str()
+            };
             format!(
-                "  - {} | {} | {} | {}",
+                "  - {} | {} | {} | {} | {}",
                 b.name,
+                kind,
                 q_names
                     .get(&b.quadrant)
                     .map(|s| s.as_str())
@@ -568,21 +648,112 @@ pub async fn review_and_augment(
     let new_blips: Vec<Blip> = parsed
         .blips
         .into_iter()
-        .map(|mut b| {
-            b.ring = b.ring.to_lowercase().trim().to_string();
-            b.quadrant = b.quadrant.to_lowercase().trim().to_string();
-            if !["adopt", "trial", "assess", "hold"].contains(&b.ring.as_str()) {
-                b.ring = "assess".to_string();
-            }
-            if !["q1", "q2", "q3", "q4"].contains(&b.quadrant.as_str()) {
-                b.quadrant = "q1".to_string();
-            }
-            b
-        })
+        .map(normalize_blip)
         .collect();
 
     blips.extend(new_blips);
     *blips = deduplicate(std::mem::take(blips));
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{canonical_key, deduplicate, normalize_blip, Blip};
+
+    fn blip(name: &str, ring: &str) -> Blip {
+        Blip {
+            name: name.to_string(),
+            canonical_name: String::new(),
+            kind: String::new(),
+            quadrant: "q1".to_string(),
+            ring: ring.to_string(),
+            is_open_source: true,
+            description: String::new(),
+            license: String::new(),
+            upstream: vec![],
+            downstream: vec![],
+            pros: vec![],
+            cons: vec![],
+            rationale: String::new(),
+            github_repo: String::new(),
+            github_days: None,
+            number: 0,
+        }
+    }
+
+    #[test]
+    fn deduplicate_keeps_distinct_prefix_names() {
+        let blips = vec![blip("Java", "adopt"), blip("JavaScript", "trial")];
+
+        let deduped = deduplicate(blips);
+        let names: Vec<_> = deduped.into_iter().map(|b| b.name).collect();
+
+        assert_eq!(names, vec!["Java", "JavaScript"]);
+    }
+
+    #[test]
+    fn deduplicate_keeps_distinct_subset_token_names() {
+        let blips = vec![blip("AI Model", "trial"), blip("Model", "adopt")];
+
+        let deduped = deduplicate(blips);
+        let names: Vec<_> = deduped.into_iter().map(|b| b.name).collect();
+
+        assert_eq!(names, vec!["AI Model", "Model"]);
+    }
+
+    #[test]
+    fn deduplicate_merges_equivalent_normalized_names() {
+        let blips = vec![blip("React.js", "trial"), blip("React JS", "adopt")];
+
+        let deduped = deduplicate(blips);
+
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].name, "React JS");
+        assert_eq!(deduped[0].ring, "adopt");
+    }
+
+    #[test]
+    fn deduplicate_merges_known_aliases() {
+        let blips = vec![blip("Kubernetes", "trial"), blip("k8s", "adopt")];
+
+        let deduped = deduplicate(blips);
+
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(canonical_key(&deduped[0].name), "kubernetes");
+        assert_eq!(deduped[0].ring, "adopt");
+    }
+
+    #[test]
+    fn deduplicate_keeps_related_but_distinct_products() {
+        let blips = vec![blip("Redis", "adopt"), blip("RedisInsight", "trial")];
+
+        let deduped = deduplicate(blips);
+        let names: Vec<_> = deduped.into_iter().map(|b| b.name).collect();
+
+        assert_eq!(names, vec!["Redis", "RedisInsight"]);
+    }
+
+    #[test]
+    fn normalize_blip_fills_missing_canonical_name() {
+        let normalized = normalize_blip(blip("React.js", "trial"));
+
+        assert_eq!(normalized.canonical_name, "reactjs");
+        assert_eq!(normalized.kind, "");
+    }
+
+    #[test]
+    fn deduplicate_respects_kind_boundaries() {
+        let mut framework = blip("Redis", "adopt");
+        framework.canonical_name = "redis".to_string();
+        framework.kind = "database".to_string();
+
+        let mut tool = blip("Redis", "trial");
+        tool.canonical_name = "redis".to_string();
+        tool.kind = "tool".to_string();
+
+        let deduped = deduplicate(vec![normalize_blip(framework), normalize_blip(tool)]);
+
+        assert_eq!(deduped.len(), 2);
+    }
 }
