@@ -1,6 +1,6 @@
 use crate::cache;
 use crate::fetcher::docs::fetch_doc_page;
-use crate::fetcher::search::search_searxng;
+use crate::fetcher::search::{is_searxng_disabled_error, search_searxng};
 use crate::llm::LLMClient;
 use crate::radar::Blip;
 use anyhow::{anyhow, Result};
@@ -213,7 +213,7 @@ async fn discover_official_hosts(
     let query = format!("{} official website", blip.name);
     let search_results = match search_searxng(&query, client).await {
         Ok(results) => results,
-        Err(_) if !hosts.is_empty() => {
+        Err(err) if !hosts.is_empty() || is_searxng_disabled_error(&err) => {
             return Ok(OfficialHostDiscovery {
                 hosts,
                 search_degraded: true,

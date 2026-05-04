@@ -2,6 +2,8 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 
+pub const SEARXNG_DISABLED: &str = "SEARXNG_DISABLED";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchResult {
     pub title: String,
@@ -46,9 +48,13 @@ pub fn searxng_search_url(base_url: &str, query: &str) -> String {
     )
 }
 
+pub fn is_searxng_disabled_error(err: &anyhow::Error) -> bool {
+    err.to_string() == SEARXNG_DISABLED
+}
+
 pub async fn search_searxng(query: &str, client: &reqwest::Client) -> Result<Vec<SearchResult>> {
     let Some(base_url) = searxng_base_url() else {
-        return Ok(vec![]);
+        return Err(anyhow!(SEARXNG_DISABLED));
     };
     search_searxng_with_base_url(query, client, &base_url).await
 }
@@ -60,7 +66,7 @@ pub async fn search_searxng_with_base_url(
 ) -> Result<Vec<SearchResult>> {
     let base_url = base_url.trim().trim_end_matches('/').to_string();
     if base_url.is_empty() {
-        return Ok(vec![]);
+        return Err(anyhow!(SEARXNG_DISABLED));
     }
 
     let url = searxng_search_url(&base_url, query);
@@ -144,7 +150,10 @@ fn urlencoding(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_searxng_results, searxng_base_url_from_env_value, searxng_search_url};
+    use super::{
+        is_searxng_disabled_error, parse_searxng_results, search_searxng_with_base_url,
+        searxng_base_url_from_env_value, searxng_search_url,
+    };
 
     #[test]
     fn searxng_base_url_from_env_value_disables_empty_or_unset() {
@@ -162,6 +171,16 @@ mod tests {
             searxng_search_url("http://127.0.0.1:8888/", "LLM inference"),
             "http://127.0.0.1:8888/search?q=LLM+inference&format=json&language=auto&safesearch=0"
         );
+    }
+
+    #[tokio::test]
+    async fn search_with_empty_base_url_returns_disabled_error() {
+        let client = reqwest::Client::new();
+        let err = search_searxng_with_base_url("test", &client, "")
+            .await
+            .unwrap_err();
+
+        assert!(is_searxng_disabled_error(&err));
     }
 
     #[test]
