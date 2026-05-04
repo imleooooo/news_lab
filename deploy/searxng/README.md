@@ -29,6 +29,8 @@ Add this to `.env`:
 SEARXNG_URL=http://127.0.0.1:8888
 ```
 
+If `SEARXNG_URL` is not set, News Lab disables SearXNG search and does not try to connect to the local container.
+
 News Lab uses this endpoint for:
 
 - SearXNG supplemental news results

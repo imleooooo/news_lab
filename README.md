@@ -72,7 +72,7 @@ OPENAI_API_KEY=sk-...
 # 選用（提高 GitHub API 速率上限，CNCF 功能建議設定）
 GITHUB_TOKEN=ghp_...
 
-# 選用（SearXNG metasearch；新聞補充來源與企業案例搜尋使用）
+# 選用（SearXNG metasearch；設定後新聞補充來源與企業案例搜尋會使用）
 SEARXNG_URL=http://127.0.0.1:8888
 
 # 選用（技術雷達「進階審核」使用的模型，預設 gpt-5.4-2026-03-05）
@@ -91,7 +91,7 @@ REVIEW_MODEL=gpt-4o
 
 ## SearXNG Metasearch
 
-News Lab 可透過本機 SearXNG endpoint 補充新聞搜尋結果，並用於專案雷達詳情的企業案例搜尋。
+News Lab 可透過本機 SearXNG endpoint 補充新聞搜尋結果，並用於專案雷達詳情的企業案例搜尋。未設定 `SEARXNG_URL` 時，SearXNG 會停用，不會嘗試連線本機服務。
 
 ```bash
 cd deploy/searxng

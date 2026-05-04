@@ -25,15 +25,17 @@ struct SearxngResult {
     #[serde(default)]
     content: String,
     #[serde(default, rename = "publishedDate")]
-    published_date: String,
+    published_date: Option<String>,
 }
 
-pub fn searxng_base_url() -> String {
-    std::env::var("SEARXNG_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:8888".to_string())
-        .trim()
-        .trim_end_matches('/')
-        .to_string()
+pub fn searxng_base_url() -> Option<String> {
+    searxng_base_url_from_env_value(std::env::var("SEARXNG_URL").ok().as_deref())
+}
+
+pub fn searxng_base_url_from_env_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(|url| url.trim().trim_end_matches('/').to_string())
+        .filter(|url| !url.is_empty())
 }
 
 pub fn searxng_search_url(base_url: &str, query: &str) -> String {
@@ -45,9 +47,20 @@ pub fn searxng_search_url(base_url: &str, query: &str) -> String {
 }
 
 pub async fn search_searxng(query: &str, client: &reqwest::Client) -> Result<Vec<SearchResult>> {
-    let base_url = searxng_base_url();
+    let Some(base_url) = searxng_base_url() else {
+        return Ok(vec![]);
+    };
+    search_searxng_with_base_url(query, client, &base_url).await
+}
+
+pub async fn search_searxng_with_base_url(
+    query: &str,
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<Vec<SearchResult>> {
+    let base_url = base_url.trim().trim_end_matches('/').to_string();
     if base_url.is_empty() {
-        return Err(anyhow!("SEARXNG_URL is empty"));
+        return Ok(vec![]);
     }
 
     let url = searxng_search_url(&base_url, query);
@@ -90,7 +103,7 @@ pub fn parse_searxng_results(body: &str) -> Result<Vec<SearchResult>> {
                 title: title.to_string(),
                 url: url.to_string(),
                 content: item.content.trim().to_string(),
-                published: parse_searxng_date(&item.published_date),
+                published: item.published_date.as_deref().and_then(parse_searxng_date),
             })
         })
         .collect())
@@ -131,7 +144,17 @@ fn urlencoding(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_searxng_results, searxng_search_url};
+    use super::{parse_searxng_results, searxng_base_url_from_env_value, searxng_search_url};
+
+    #[test]
+    fn searxng_base_url_from_env_value_disables_empty_or_unset() {
+        assert_eq!(searxng_base_url_from_env_value(None), None);
+        assert_eq!(searxng_base_url_from_env_value(Some("   ")), None);
+        assert_eq!(
+            searxng_base_url_from_env_value(Some("http://127.0.0.1:8888/")),
+            Some("http://127.0.0.1:8888".to_string())
+        );
+    }
 
     #[test]
     fn searxng_search_url_trims_base_and_encodes_query() {
@@ -161,6 +184,26 @@ mod tests {
         assert_eq!(results[0].url, "https://example.com/news");
         assert_eq!(results[0].content, "A useful summary");
         assert!(results[0].published.is_some());
+    }
+
+    #[test]
+    fn parse_searxng_results_accepts_null_published_date() {
+        let body = r#"{
+          "results": [
+            {
+              "title": "Undated Result",
+              "url": "https://example.com/undated",
+              "content": "No known date",
+              "publishedDate": null
+            }
+          ]
+        }"#;
+
+        let results = parse_searxng_results(body).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Undated Result");
+        assert!(results[0].published.is_none());
     }
 
     #[test]
