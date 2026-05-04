@@ -1030,7 +1030,7 @@ async fn run_radar_browser(
     llm: &LLMClient,
 ) -> Result<()> {
     // Build grid and assign blip numbers
-    let rg = radar_terminal::build_radar_grid(&mut blips, &q_names);
+    let rg = radar_terminal::build_radar_grid(&mut blips, &q_names, mode.shows_source_icon());
 
     // Render
     radar_terminal::render_radar(&rg, &q_names, kw, mode.title(), mode.shows_source_icon());

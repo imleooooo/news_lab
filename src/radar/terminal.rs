@@ -74,6 +74,16 @@ fn p2g(r_frac: f64, angle_deg: f64) -> Option<(usize, usize)> {
 type Grid = Vec<Vec<char>>;
 type ColorGrid = Vec<Vec<String>>;
 
+fn marker_color(is_open_source: bool, show_source_colors: bool) -> &'static str {
+    if !show_source_colors {
+        "bright_cyan"
+    } else if is_open_source {
+        "bright_green"
+    } else {
+        "bright_red"
+    }
+}
+
 fn set(grid: &mut Grid, colors: &mut ColorGrid, r: usize, c: usize, ch: char, color: &str) {
     grid[r][c] = ch;
     colors[r][c] = color.to_string();
@@ -163,12 +173,7 @@ pub fn build_radar(blips: &mut [Blip], _q_names: &HashMap<String, String>) {
 
             for (idx, &blip_idx) in indices.iter().enumerate() {
                 blips[blip_idx].number = num;
-                let is_oss = blips[blip_idx].is_open_source;
-                let color = if is_oss {
-                    "bold bright_green"
-                } else {
-                    "bold bright_red"
-                };
+                let color = marker_color(blips[blip_idx].is_open_source, true);
                 let ns = num.to_string();
 
                 if let Some((r, c)) = p2g(frac, angles[idx]) {
@@ -232,7 +237,11 @@ pub struct RadarGrid {
     pub colors: ColorGrid,
 }
 
-pub fn build_radar_grid(blips: &mut [Blip], _q_names: &HashMap<String, String>) -> RadarGrid {
+pub fn build_radar_grid(
+    blips: &mut [Blip],
+    _q_names: &HashMap<String, String>,
+    show_source_colors: bool,
+) -> RadarGrid {
     let mut grid: Grid = vec![vec![' '; COLS]; ROWS];
     let mut colors: ColorGrid = vec![vec!["none".to_string(); COLS]; ROWS];
 
@@ -317,8 +326,7 @@ pub fn build_radar_grid(blips: &mut [Blip], _q_names: &HashMap<String, String>) 
 
             for (idx, &bi) in indices.iter().enumerate() {
                 blips[bi].number = num;
-                let is_oss = blips[bi].is_open_source;
-                let color = if is_oss { "bright_green" } else { "bright_red" };
+                let color = marker_color(blips[bi].is_open_source, show_source_colors);
                 let ns = num.to_string();
 
                 if let Some((r, c)) = p2g(frac, angles[idx]) {
@@ -400,6 +408,7 @@ pub fn render_radar(
             match color.as_str() {
                 "bright_green" => print!("{}", style(s).green().bold()),
                 "bright_red" => print!("{}", style(s).red().bold()),
+                "bright_cyan" => print!("{}", style(s).cyan().bold()),
                 "grey30" => print!("{}", style(s).dim()),
                 "grey42" => print!("{}", style(s).dim()),
                 "grey54" => print!("{}", style(s).dim()),
@@ -580,33 +589,35 @@ pub fn show_blip_detail(
         }
     }
 
-    // Enterprise cases
-    content.push_str("\n\n🏢 企業案例\n");
-    if let Some(bundle) = case_bundle {
-        if bundle.cases.is_empty() {
-            content.push_str("  • 未找到符合官方標準的公開案例\n");
-        } else {
-            for case in &bundle.cases {
-                content.push_str(&format!("  • {}：{}\n", case.company, case.usage_summary));
-                let mut meta = vec![case.publisher.clone()];
-                if !case.published_at.is_empty() {
-                    meta.push(case.published_at.clone());
+    // Enterprise cases are project-only. Method radar intentionally skips this section.
+    if show_source_icon {
+        content.push_str("\n\n🏢 企業案例\n");
+        if let Some(bundle) = case_bundle {
+            if bundle.cases.is_empty() {
+                content.push_str("  • 未找到符合官方標準的公開案例\n");
+            } else {
+                for case in &bundle.cases {
+                    content.push_str(&format!("  • {}：{}\n", case.company, case.usage_summary));
+                    let mut meta = vec![case.publisher.clone()];
+                    if !case.published_at.is_empty() {
+                        meta.push(case.published_at.clone());
+                    }
+                    if !case.evidence_type.is_empty() {
+                        meta.push(case.evidence_type.clone());
+                    }
+                    content.push_str(&format!(
+                        "    來源：{} — {}\n",
+                        case.title,
+                        meta.join(" | ")
+                    ));
+                    content.push_str(&format!("    URL：{}\n", case.url));
                 }
-                if !case.evidence_type.is_empty() {
-                    meta.push(case.evidence_type.clone());
-                }
-                content.push_str(&format!(
-                    "    來源：{} — {}\n",
-                    case.title,
-                    meta.join(" | ")
-                ));
-                content.push_str(&format!("    URL：{}\n", case.url));
             }
+        } else if let Some(err) = case_error {
+            content.push_str(&format!("  • 查找失敗：{}\n", err));
+        } else {
+            content.push_str("  • 尚未載入案例資料\n");
         }
-    } else if let Some(err) = case_error {
-        content.push_str(&format!("  • 查找失敗：{}\n", err));
-    } else {
-        content.push_str("  • 尚未載入案例資料\n");
     }
 
     // Pros
