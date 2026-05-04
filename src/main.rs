@@ -26,7 +26,7 @@ use fetcher::{
 use inquire::{validator::Validation, Select, Text};
 use llm::LLMClient;
 use radar::{
-    check_oss_activity, extract_blips, review_and_augment, terminal as radar_terminal,
+    check_oss_activity, extract_blips, review_and_augment, terminal as radar_terminal, RadarMode,
     ReviewOutcome,
 };
 use serde::{Deserialize, Serialize};
@@ -894,7 +894,12 @@ fn render_analysis_sections(text: &str) {
 
 // ── Run: Terminal Radar ────────────────────────────────────────────────────────
 
-async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()> {
+async fn run_terminal_radar(
+    kw: &str,
+    cfg: &Config,
+    llm: &LLMClient,
+    mode: RadarMode,
+) -> Result<()> {
     let fetch_n = cfg.max_results.max(12);
     let default_review_model = match &cfg.llm.provider {
         LLMProvider::OpenAI => "gpt-5.4-2026-03-05",
@@ -907,6 +912,7 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
     let review_cache_key = review_settings.cache_key();
     let cache_key = [
         "radar",
+        mode.cache_key(),
         kw,
         &llm_cache_key,
         &review_cache_key,
@@ -916,7 +922,7 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
         cache::get_with_ttl::<RadarCacheEntry>(&cache_key, RADAR_CACHE_TTL_SECS)
     {
         show_cache_hit(ttl);
-        return run_radar_browser(kw, cached.q_names, cached.blips, llm).await;
+        return run_radar_browser(kw, cached.q_names, cached.blips, mode, llm).await;
     }
 
     // Fetch radar signals (at least 12 items for better radar coverage)
@@ -925,16 +931,20 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
     spinner.finish(&format!("取得 {} 筆資料", items.len()));
 
     if items.is_empty() {
-        panel("技術雷達", "找不到足夠的技術資料。", "yellow");
+        panel(mode.title(), "找不到足夠的技術資料。", "yellow");
         return Ok(());
     }
 
-    let spinner = Spinner::new("LLM 分析技術生態...");
-    let (q_names, mut blips) = extract_blips(&items, kw, llm).await?;
-    spinner.finish(&format!("識別出 {} 個技術項目", blips.len()));
+    let spinner = Spinner::new(&format!("LLM 分析{}...", mode.title()));
+    let (q_names, mut blips) = extract_blips(&items, kw, mode, llm).await?;
+    spinner.finish(&format!(
+        "識別出 {} 個{}項目",
+        blips.len(),
+        mode.item_label()
+    ));
 
     if blips.is_empty() {
-        panel("技術雷達", "無法從資料中提取技術項目。", "yellow");
+        panel(mode.title(), "無法從資料中提取足夠項目。", "yellow");
         return Ok(());
     }
 
@@ -946,7 +956,7 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
             "進階模型審核雷達圖（第 {}/2 輪，{}）...",
             round, review_model
         ));
-        match review_and_augment(&mut blips, &q_names, kw, &review_llm).await {
+        match review_and_augment(&mut blips, &q_names, kw, mode, &review_llm).await {
             ReviewOutcome::Satisfied => {
                 spinner.finish(&format!(
                     "第 {} 輪審核通過，共 {} 個項目",
@@ -965,7 +975,7 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
             ReviewOutcome::Skipped { reason } => {
                 spinner.finish(&format!("第 {} 輪審核失敗，已跳過", round));
                 panel(
-                    "技術雷達",
+                    mode.title(),
                     &format!(
                         "進階審核未執行成功，雷達圖將直接使用初步結果。\n原因：{}",
                         reason
@@ -979,19 +989,24 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
 
     print_usage(&review_llm);
 
-    // GitHub activity check for open-source blips
-    let spinner = Spinner::new("檢查開源專案 GitHub 活躍度...");
-    let activity_complete = check_oss_activity(&mut blips).await;
-    if activity_complete {
-        spinner.finish("");
+    let activity_complete = if matches!(mode, RadarMode::Project) {
+        // GitHub activity check for open-source project blips.
+        let spinner = Spinner::new("檢查開源專案 GitHub 活躍度...");
+        let complete = check_oss_activity(&mut blips).await;
+        if complete {
+            spinner.finish("");
+        } else {
+            spinner.finish("GitHub API 限速，已跳過本輪活躍度降級");
+            panel(
+                mode.title(),
+                "GitHub Search API 已限速，為避免只讓前半段專案被降級，本輪未套用任何 GitHub 活躍度修正。",
+                "yellow",
+            );
+        }
+        complete
     } else {
-        spinner.finish("GitHub API 限速，已跳過本輪活躍度降級");
-        panel(
-            "技術雷達",
-            "GitHub Search API 已限速，為避免只讓前半段專案被降級，本輪未套用任何 GitHub 活躍度修正。",
-            "yellow",
-        );
-    }
+        true
+    };
 
     if activity_complete {
         cache::put_with_ttl(
@@ -1004,21 +1019,27 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
         );
     }
 
-    run_radar_browser(kw, q_names, blips, llm).await
+    run_radar_browser(kw, q_names, blips, mode, llm).await
 }
 
 async fn run_radar_browser(
     kw: &str,
     q_names: HashMap<String, String>,
     mut blips: Vec<radar::Blip>,
+    mode: RadarMode,
     llm: &LLMClient,
 ) -> Result<()> {
     // Build grid and assign blip numbers
     let rg = radar_terminal::build_radar_grid(&mut blips, &q_names);
 
     // Render
-    radar_terminal::render_radar(&rg, &q_names, kw);
-    radar_terminal::render_legend(&blips, &q_names);
+    radar_terminal::render_radar(&rg, &q_names, kw, mode.title(), mode.shows_source_icon());
+    radar_terminal::render_legend(
+        &blips,
+        &q_names,
+        mode.item_label(),
+        mode.shows_source_icon(),
+    );
 
     // Interactive blip browser
     loop {
@@ -1026,11 +1047,19 @@ async fn run_radar_browser(
         let mut sorted_blips: Vec<&radar::Blip> = blips.iter().collect();
         sorted_blips.sort_by_key(|b| b.number);
         for b in &sorted_blips {
-            let icon = if b.is_open_source { "▲" } else { "●" };
+            let icon = if mode.shows_source_icon() {
+                if b.is_open_source {
+                    "▲"
+                } else {
+                    "●"
+                }
+            } else {
+                "◆"
+            };
             choices.push(format!("#{} {} {} ({})", b.number, icon, b.name, b.ring));
         }
 
-        let sel = Select::new("查看技術項目詳情:", choices)
+        let sel = Select::new(&format!("查看{}詳情:", mode.item_label()), choices)
             .prompt()
             .unwrap_or_else(|_| "← 返回主選單".to_string());
 
@@ -1046,27 +1075,40 @@ async fn run_radar_browser(
                 .and_then(|s| s.parse::<usize>().ok())
             {
                 if let Some(b) = blips.iter().find(|b| b.number == n) {
-                    let spinner = Spinner::new(&format!("查找「{}」的企業案例...", b.name));
-                    let case_result =
-                        fetch_enterprise_cases(b, llm, 3, SourcePolicy::OfficialOnly).await;
-                    match &case_result {
-                        Ok(bundle) => {
-                            if bundle.cases.is_empty() {
-                                spinner.finish("未找到符合官方標準的公開案例");
-                            } else {
-                                spinner.finish(&format!("找到 {} 筆官方案例", bundle.cases.len()));
+                    let case_result = if matches!(mode, RadarMode::Project) {
+                        let spinner = Spinner::new(&format!("查找「{}」的企業案例...", b.name));
+                        let result =
+                            fetch_enterprise_cases(b, llm, 3, SourcePolicy::OfficialOnly).await;
+                        match &result {
+                            Ok(bundle) => {
+                                if bundle.cases.is_empty() {
+                                    spinner.finish("未找到符合官方標準的公開案例");
+                                } else {
+                                    spinner
+                                        .finish(&format!("找到 {} 筆官方案例", bundle.cases.len()));
+                                }
                             }
+                            Err(_) => spinner.finish("企業案例查找失敗"),
                         }
-                        Err(_) => spinner.finish("企業案例查找失敗"),
-                    }
+                        Some(result)
+                    } else {
+                        None
+                    };
 
                     radar_terminal::show_blip_detail(
                         b,
                         &q_names,
-                        case_result.as_ref().ok(),
-                        case_result.as_ref().err().map(|e| e.to_string()),
+                        case_result.as_ref().and_then(|r| r.as_ref().ok()),
+                        case_result
+                            .as_ref()
+                            .and_then(|r| r.as_ref().err().map(|e| e.to_string())),
+                        mode.shows_source_icon(),
                     );
                     separator();
+
+                    if matches!(mode, RadarMode::Method) {
+                        continue;
+                    }
 
                     // Sub-menu: competitive analysis or back
                     let action = Select::new(
@@ -1585,7 +1627,8 @@ async fn main() -> Result<()> {
                 "arXiv 論文摘要".to_string(),
                 "Podcast 摘要".to_string(),
                 "知識圖譜".to_string(),
-                "技術生態雷達和競品分析 (請使用如 AI on K8s 去提問)".to_string(),
+                "專案雷達和競品分析 (開源/閉源軟體)".to_string(),
+                "方法雷達 (方法論/演算法)".to_string(),
                 "其他功能 ▶".to_string(),
                 format!("調整筆數 (目前: {})", cfg.max_results),
                 "清空快取".to_string(),
@@ -1609,7 +1652,12 @@ async fn main() -> Result<()> {
                 f if f.contains("arXiv") => run_paper_summary(&keyword, &cfg, &llm).await,
                 f if f.contains("Podcast") => run_podcast_summary(&keyword, &cfg, &llm).await,
                 f if f.contains("知識圖譜") => run_knowledge_graph(&keyword, &cfg, &llm).await,
-                f if f.contains("雷達") => run_terminal_radar(&keyword, &cfg, &llm).await,
+                f if f.contains("專案雷達") => {
+                    run_terminal_radar(&keyword, &cfg, &llm, RadarMode::Project).await
+                }
+                f if f.contains("方法雷達") => {
+                    run_terminal_radar(&keyword, &cfg, &llm, RadarMode::Method).await
+                }
                 f if f.contains("其他功能") => run_extras(&cfg, &llm).await,
                 f if f.contains("調整筆數") => {
                     let cur = cfg.max_results.to_string();

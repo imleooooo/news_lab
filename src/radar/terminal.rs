@@ -369,14 +369,20 @@ pub fn build_radar_grid(blips: &mut [Blip], _q_names: &HashMap<String, String>) 
 }
 
 // ── Render radar (matches Python render_radar) ────────────────────────────────
-pub fn render_radar(rg: &RadarGrid, q_names: &HashMap<String, String>, kw: &str) {
+pub fn render_radar(
+    rg: &RadarGrid,
+    q_names: &HashMap<String, String>,
+    kw: &str,
+    title: &str,
+    show_source_legend: bool,
+) {
     let q1 = q_names.get("q1").map(|s| s.as_str()).unwrap_or("Q1");
     let q2 = q_names.get("q2").map(|s| s.as_str()).unwrap_or("Q2");
     let q3 = q_names.get("q3").map(|s| s.as_str()).unwrap_or("Q3");
     let q4 = q_names.get("q4").map(|s| s.as_str()).unwrap_or("Q4");
 
     println!();
-    println!("  {}", style(format!("「{}」技術雷達", kw)).bold().cyan());
+    println!("  {}", style(format!("「{}」{}", kw, title)).bold().cyan());
     println!();
 
     // top quadrant labels
@@ -413,9 +419,11 @@ pub fn render_radar(rg: &RadarGrid, q_names: &HashMap<String, String>, kw: &str)
 
     // Ring legend
     print!("  ");
-    print!("{} ", style("▲=開源").green());
-    print!("{} ", style("●=閉源").red());
-    print!("  ");
+    if show_source_legend {
+        print!("{} ", style("▲=開源").green());
+        print!("{} ", style("●=閉源").red());
+        print!("  ");
+    }
     print!("{}", style("A").green());
     print!("=Adopt ");
     print!("{}", style("T").cyan());
@@ -428,9 +436,17 @@ pub fn render_radar(rg: &RadarGrid, q_names: &HashMap<String, String>, kw: &str)
 }
 
 // ── Render legend table ───────────────────────────────────────────────────────
-pub fn render_legend(blips: &[Blip], q_names: &HashMap<String, String>) {
+pub fn render_legend(
+    blips: &[Blip],
+    q_names: &HashMap<String, String>,
+    item_label: &str,
+    show_source_icon: bool,
+) {
     println!();
-    println!("{}", style("  技術雷達項目清單").bold().white());
+    println!(
+        "{}",
+        style(format!("  {}項目清單", item_label)).bold().white()
+    );
 
     let mut current_q: Option<String> = None;
     let ordered: Vec<&Blip> = {
@@ -455,7 +471,8 @@ pub fn render_legend(blips: &[Blip], q_names: &HashMap<String, String>) {
     table.load_preset(UTF8_FULL);
     table.set_content_arrangement(ContentArrangement::Dynamic);
     table.set_width(78);
-    table.set_header(vec!["#", "", "專案", "成熟度", "象限"]);
+    let icon_header = if show_source_icon { "" } else { "類型" };
+    table.set_header(vec!["#", icon_header, item_label, "成熟度", "象限"]);
 
     for blip in &ordered {
         let q = &blip.quadrant;
@@ -477,7 +494,15 @@ pub fn render_legend(blips: &[Blip], q_names: &HashMap<String, String>) {
             ]);
         }
 
-        let icon = if blip.is_open_source { "▲" } else { "●" };
+        let icon = if show_source_icon {
+            if blip.is_open_source {
+                "▲"
+            } else {
+                "●"
+            }
+        } else {
+            "◆"
+        };
         let ring_label = blip.ring.to_uppercase();
         let q_label = q_names.get(q).cloned().unwrap_or_else(|| q.clone());
 
@@ -499,22 +524,25 @@ pub fn show_blip_detail(
     q_names: &HashMap<String, String>,
     case_bundle: Option<&BlipCaseBundle>,
     case_error: Option<String>,
+    show_source_icon: bool,
 ) {
     let q_label = q_names
         .get(&blip.quadrant)
         .cloned()
         .unwrap_or_else(|| blip.quadrant.clone());
     let ring_upper = blip.ring.to_uppercase();
-    let icon = if blip.is_open_source {
-        "▲ 開源"
+    let type_label = if show_source_icon && blip.is_open_source {
+        "▲ 開源".to_string()
+    } else if show_source_icon {
+        "● 閉源".to_string()
     } else {
-        "● 閉源"
+        "◆ 方法".to_string()
     };
 
     let mut content = String::new();
 
     // Header info
-    content.push_str(&format!("{icon}   {ring_upper}   {q_label}"));
+    content.push_str(&format!("{type_label}   {ring_upper}   {q_label}"));
     if !blip.license.is_empty() {
         content.push_str(&format!("   {}", blip.license));
     }
