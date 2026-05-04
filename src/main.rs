@@ -8,7 +8,7 @@ mod summarizer;
 mod ui;
 
 use anyhow::Result;
-use config::{configure, Config};
+use config::{configure, Config, LLMProvider};
 use console::style;
 use fetcher::{
     arxiv::fetch_domain_papers,
@@ -896,8 +896,12 @@ fn render_analysis_sections(text: &str) {
 
 async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()> {
     let fetch_n = cfg.max_results.max(12);
+    let default_review_model = match &cfg.llm.provider {
+        LLMProvider::OpenAI => "gpt-5.4-2026-03-05",
+        LLMProvider::Custom { .. } => &cfg.llm.model,
+    };
     let review_model =
-        std::env::var("REVIEW_MODEL").unwrap_or_else(|_| "gpt-5.4-2026-03-05".to_string());
+        std::env::var("REVIEW_MODEL").unwrap_or_else(|_| default_review_model.to_string());
     let review_settings = cfg.llm.with_model(&review_model);
     let llm_cache_key = cfg.llm.cache_key();
     let review_cache_key = review_settings.cache_key();
