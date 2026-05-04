@@ -1,5 +1,6 @@
 use crate::cache;
 use crate::fetcher::docs::fetch_doc_page;
+use crate::fetcher::search::search_searxng;
 use crate::llm::LLMClient;
 use crate::radar::Blip;
 use anyhow::{anyhow, Result};
@@ -10,7 +11,6 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 const CASE_CACHE_PREFIX: &str = "enterprise_cases";
-const SEARCH_ENDPOINT: &str = "https://html.duckduckgo.com/html/?q=";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum SourcePolicy {
@@ -44,12 +44,6 @@ pub struct BlipCaseBundle {
     pub cases: Vec<CaseEvidence>,
     pub fetched_at: String,
     pub source_policy: String,
-}
-
-#[derive(Debug, Clone)]
-struct SearchResult {
-    title: String,
-    url: String,
 }
 
 struct PageCollection {
@@ -217,7 +211,7 @@ async fn discover_official_hosts(
     }
 
     let query = format!("{} official website", blip.name);
-    let search_results = match search_duckduckgo(&query, client).await {
+    let search_results = match search_searxng(&query, client).await {
         Ok(results) => results,
         Err(_) if !hosts.is_empty() => {
             return Ok(OfficialHostDiscovery {
@@ -286,7 +280,7 @@ async fn collect_case_pages(
         }
 
         for query in case_search_queries(host, &blip.name) {
-            for result in search_duckduckgo(&query, client).await?.into_iter().take(4) {
+            for result in search_searxng(&query, client).await?.into_iter().take(4) {
                 if !host_matches(&result.url, host) || !seen_urls.insert(result.url.clone()) {
                     continue;
                 }
@@ -408,56 +402,6 @@ fn resolve_internal_url(base_url: &str, href: &str) -> Option<String> {
     }
 
     Some(format!("{base}/{href}"))
-}
-
-fn search_error(query: &str, reason: &str) -> anyhow::Error {
-    anyhow!("DuckDuckGo 搜尋失敗（{}）: {}", query, reason)
-}
-
-async fn search_duckduckgo(query: &str, client: &reqwest::Client) -> Result<Vec<SearchResult>> {
-    let url = format!("{}{}", SEARCH_ENDPOINT, urlencoding(query));
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|_| search_error(query, "request error"))?;
-    if !resp.status().is_success() {
-        return Err(search_error(query, &format!("HTTP {}", resp.status())));
-    }
-    let body = resp
-        .text()
-        .await
-        .map_err(|_| search_error(query, "response body error"))?;
-    Ok(parse_duckduckgo_results(&body))
-}
-
-fn parse_duckduckgo_results(html: &str) -> Vec<SearchResult> {
-    static RESULT_RE: OnceLock<Regex> = OnceLock::new();
-    let re = RESULT_RE.get_or_init(|| {
-        Regex::new(r#"(?is)<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>"#)
-            .unwrap()
-    });
-
-    let mut results = Vec::new();
-    for cap in re.captures_iter(html) {
-        let href = decode_ddg_redirect(&decode_html_entities(&cap[1]));
-        let title = strip_tags(&decode_html_entities(&cap[2]));
-        if href.starts_with("http://") || href.starts_with("https://") {
-            results.push(SearchResult { title, url: href });
-        }
-        if results.len() >= 10 {
-            break;
-        }
-    }
-    results
-}
-
-fn decode_ddg_redirect(href: &str) -> String {
-    let needle = "uddg=";
-    if let Some(idx) = href.find(needle) {
-        return percent_decode(&href[idx + needle.len()..]);
-    }
-    href.to_string()
 }
 
 fn looks_like_case_page(url: &str, title: &str, text: &str, product_name: &str) -> bool {
@@ -633,60 +577,6 @@ fn normalize_text(s: &str) -> String {
         .collect()
 }
 
-fn strip_tags(s: &str) -> String {
-    static TAG_RE: OnceLock<Regex> = OnceLock::new();
-    let re = TAG_RE.get_or_init(|| Regex::new(r"<[^>]+>").unwrap());
-    re.replace_all(s, " ").trim().to_string()
-}
-
-fn decode_html_entities(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hex = &s[i + 1..i + 3];
-                if let Ok(v) = u8::from_str_radix(hex, 16) {
-                    out.push(v);
-                    i += 3;
-                    continue;
-                }
-                out.push(bytes[i]);
-            }
-            b'+' => out.push(b' '),
-            b => out.push(b),
-        }
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn urlencoding(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            ' ' => "+".to_string(),
-            _ => {
-                let mut buf = [0u8; 4];
-                let len = c.encode_utf8(&mut buf).len();
-                buf[..len]
-                    .iter()
-                    .map(|b| format!("%{:02X}", b))
-                    .collect::<String>()
-            }
-        })
-        .collect()
-}
-
 fn strip_code_fences(s: &str) -> &str {
     let s = s.trim();
     let s = if s.starts_with("```") {
@@ -749,15 +639,6 @@ fn sanitize_json_strings(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_duckduckgo_redirect_url() {
-        let href = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fcase-study";
-        assert_eq!(
-            decode_ddg_redirect(href),
-            "https://example.com/case-study".to_string()
-        );
-    }
 
     #[test]
     fn host_match_allows_subdomain() {

@@ -72,6 +72,9 @@ OPENAI_API_KEY=sk-...
 # 選用（提高 GitHub API 速率上限，CNCF 功能建議設定）
 GITHUB_TOKEN=ghp_...
 
+# 選用（SearXNG metasearch；新聞補充來源與企業案例搜尋使用）
+SEARXNG_URL=http://127.0.0.1:8888
+
 # 選用（技術雷達「進階審核」使用的模型，預設 gpt-5.4-2026-03-05）
 REVIEW_MODEL=gpt-4o
 ```
@@ -83,6 +86,24 @@ REVIEW_MODEL=gpt-4o
 - API base URL，例如 `https://example.com/v1`（不要填完整 `/chat/completions` endpoint）
 - API key
 - model name
+
+---
+
+## SearXNG Metasearch
+
+News Lab 可透過本機 SearXNG endpoint 補充新聞搜尋結果，並用於專案雷達詳情的企業案例搜尋。
+
+```bash
+cd deploy/searxng
+docker compose up -d
+curl 'http://127.0.0.1:8888/search?q=LLM%20inference&format=json'
+```
+
+確認 `.env` 內有：
+
+```env
+SEARXNG_URL=http://127.0.0.1:8888
+```
 
 ---
 
@@ -137,7 +158,8 @@ news-rs/
     ├── ui.rs              # 終端機 UI 元件（panel、spinner、separator）
     ├── summarizer.rs      # AI 摘要函式（prompt 在 build.rs 加密）
     ├── fetcher/
-    │   ├── tech.rs        # Hacker News、InfoQ、iThome、各科技媒體
+    │   ├── tech.rs        # Hacker News、SearXNG、InfoQ、iThome、各科技媒體
+    │   ├── search.rs      # SearXNG metasearch client
     │   ├── arxiv.rs       # arXiv Atom XML 解析
     │   ├── podcast.rs     # iTunes Search + RSS Feed
     │   ├── huggingface.rs # HuggingFace API

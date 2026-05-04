@@ -5,6 +5,7 @@ pub mod docs;
 pub mod huggingface;
 pub mod podcast;
 pub mod release;
+pub mod search;
 pub mod tech;
 
 use chrono::{DateTime, Utc};

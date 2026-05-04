@@ -20,7 +20,8 @@ use fetcher::{
     release::{fetch_repo_releases, normalise_repo},
     tech::{
         expand_news_keywords, fetch_all_rss, fetch_github, fetch_github_emerging,
-        fetch_hackernews_multi, fetch_medium_rss, fetch_radar_signals, fetch_tech_news,
+        fetch_hackernews_multi, fetch_medium_rss, fetch_radar_signals, fetch_searxng_news_multi,
+        fetch_tech_news,
     },
 };
 use inquire::{validator::Validation, Select, Text};
@@ -151,10 +152,11 @@ async fn run_news_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()>
     // Step 2: fetch from all sources in parallel using language-appropriate keywords
     let spinner = Spinner::new(&format!("正在抓取新聞：{}", kw));
 
-    let (hn, rss, medium) = tokio::join!(
+    let (hn, rss, medium, searxng) = tokio::join!(
         fetch_hackernews_multi(&en_kw, max),
         fetch_all_rss(&en_kw, &zh_kw, max),
         fetch_medium_rss(&en_kw, max),
+        fetch_searxng_news_multi(&en_kw, max),
     );
 
     // HN: light relevance filter — at least ONE expanded keyword (en_kw) must appear
@@ -184,6 +186,11 @@ async fn run_news_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()>
         )
         .chain(
             medium
+                .into_iter()
+                .filter(|item| !item.description.trim().is_empty()),
+        )
+        .chain(
+            searxng
                 .into_iter()
                 .filter(|item| !item.description.trim().is_empty()),
         )

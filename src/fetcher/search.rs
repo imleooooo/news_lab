@@ -1,0 +1,171 @@
+use anyhow::{anyhow, Result};
+use chrono::{DateTime, NaiveDate, Utc};
+use serde::Deserialize;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchResult {
+    pub title: String,
+    pub url: String,
+    pub content: String,
+    pub published: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearxngResponse {
+    #[serde(default)]
+    results: Vec<SearxngResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearxngResult {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default, rename = "publishedDate")]
+    published_date: String,
+}
+
+pub fn searxng_base_url() -> String {
+    std::env::var("SEARXNG_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8888".to_string())
+        .trim()
+        .trim_end_matches('/')
+        .to_string()
+}
+
+pub fn searxng_search_url(base_url: &str, query: &str) -> String {
+    format!(
+        "{}/search?q={}&format=json&language=auto&safesearch=0",
+        base_url.trim().trim_end_matches('/'),
+        urlencoding(query)
+    )
+}
+
+pub async fn search_searxng(query: &str, client: &reqwest::Client) -> Result<Vec<SearchResult>> {
+    let base_url = searxng_base_url();
+    if base_url.is_empty() {
+        return Err(anyhow!("SEARXNG_URL is empty"));
+    }
+
+    let url = searxng_search_url(&base_url, query);
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| anyhow!("SearXNG 搜尋失敗（{}）: {}", query, e))?;
+
+    if !resp.status().is_success() {
+        return Err(anyhow!(
+            "SearXNG 搜尋失敗（{}）: HTTP {}",
+            query,
+            resp.status()
+        ));
+    }
+
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| anyhow!("SearXNG 回應讀取失敗（{}）: {}", query, e))?;
+    parse_searxng_results(&body)
+}
+
+pub fn parse_searxng_results(body: &str) -> Result<Vec<SearchResult>> {
+    let parsed: SearxngResponse = serde_json::from_str(body)?;
+    Ok(parsed
+        .results
+        .into_iter()
+        .filter_map(|item| {
+            let url = item.url.trim();
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return None;
+            }
+            let title = item.title.trim();
+            if title.is_empty() {
+                return None;
+            }
+            Some(SearchResult {
+                title: title.to_string(),
+                url: url.to_string(),
+                content: item.content.trim().to_string(),
+                published: parse_searxng_date(&item.published_date),
+            })
+        })
+        .collect())
+}
+
+fn parse_searxng_date(s: &str) -> Option<DateTime<Utc>> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
+        .or_else(|| {
+            NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .ok()
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+                .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc))
+        })
+}
+
+fn urlencoding(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+            ' ' => "+".to_string(),
+            _ => {
+                let mut buf = [0u8; 4];
+                let len = c.encode_utf8(&mut buf).len();
+                buf[..len]
+                    .iter()
+                    .map(|b| format!("%{:02X}", b))
+                    .collect::<String>()
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_searxng_results, searxng_search_url};
+
+    #[test]
+    fn searxng_search_url_trims_base_and_encodes_query() {
+        assert_eq!(
+            searxng_search_url("http://127.0.0.1:8888/", "LLM inference"),
+            "http://127.0.0.1:8888/search?q=LLM+inference&format=json&language=auto&safesearch=0"
+        );
+    }
+
+    #[test]
+    fn parse_searxng_results_reads_core_fields() {
+        let body = r#"{
+          "results": [
+            {
+              "title": "Example News",
+              "url": "https://example.com/news",
+              "content": "A useful summary",
+              "publishedDate": "2026-05-01"
+            }
+          ]
+        }"#;
+
+        let results = parse_searxng_results(body).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Example News");
+        assert_eq!(results[0].url, "https://example.com/news");
+        assert_eq!(results[0].content, "A useful summary");
+        assert!(results[0].published.is_some());
+    }
+
+    #[test]
+    fn parse_searxng_results_accepts_empty_results() {
+        let results = parse_searxng_results(r#"{"results":[]}"#).unwrap();
+        assert!(results.is_empty());
+    }
+}

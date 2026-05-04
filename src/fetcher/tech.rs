@@ -1,4 +1,5 @@
 use super::NewsItem;
+use crate::fetcher::search::search_searxng;
 use crate::llm::LLMClient;
 use crate::radar::RadarSignal;
 use chrono::{DateTime, Utc};
@@ -314,15 +315,93 @@ pub async fn fetch_github_emerging(kw: &str, max: usize) -> Vec<NewsItem> {
 // ── Combined ───────────────────────────────────────────────────────────────────
 
 pub async fn fetch_tech_news(kw: &str, max: usize) -> Vec<NewsItem> {
-    let hn_max = (max as f64 * 0.6).ceil() as usize;
-    let gh_max = (max as f64 * 0.4).ceil() as usize;
+    let hn_max = (max as f64 * 0.5).ceil() as usize;
+    let gh_max = (max as f64 * 0.3).ceil() as usize;
+    let searxng_max = max.saturating_sub(hn_max + gh_max).max(1);
 
-    let (hn, gh) = tokio::join!(fetch_hackernews(kw, hn_max), fetch_github(kw, gh_max));
+    let (hn, gh, web) = tokio::join!(
+        fetch_hackernews(kw, hn_max),
+        fetch_github(kw, gh_max),
+        fetch_searxng_news(kw, searxng_max)
+    );
 
-    let mut combined: Vec<NewsItem> = hn.into_iter().chain(gh).collect();
+    let mut combined: Vec<NewsItem> = hn.into_iter().chain(gh).chain(web).collect();
     combined.sort_by(|a, b| b.published.cmp(&a.published));
     combined.truncate(max);
     combined
+}
+
+pub async fn fetch_searxng_news_multi(queries: &[String], max: usize) -> Vec<NewsItem> {
+    let queries: Vec<String> = queries
+        .iter()
+        .take(4)
+        .filter(|q| !q.trim().is_empty())
+        .cloned()
+        .collect();
+    if queries.is_empty() {
+        return vec![];
+    }
+
+    let per_query = ((max / queries.len()) + 2).min(max);
+    let futures: Vec<_> = queries
+        .iter()
+        .map(|q| fetch_searxng_news(q, per_query))
+        .collect();
+    let results = join_all(futures).await;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut all: Vec<NewsItem> = results
+        .into_iter()
+        .flatten()
+        .filter(|item| seen.insert(item.url.clone()))
+        .collect();
+
+    all.sort_by(|a, b| b.published.cmp(&a.published));
+    all.truncate(max);
+    all
+}
+
+async fn fetch_searxng_news(query: &str, max: usize) -> Vec<NewsItem> {
+    if max == 0 {
+        return vec![];
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .user_agent("news_lab/0.1")
+        .build()
+        .unwrap_or_default();
+
+    let Ok(results) = search_searxng(query, &client).await else {
+        return vec![];
+    };
+    let query_lower = query.to_lowercase();
+    let terms: Vec<&str> = query_lower
+        .split_whitespace()
+        .filter(|term| term.len() >= 3)
+        .collect();
+
+    results
+        .into_iter()
+        .filter(|result| {
+            if terms.is_empty() {
+                return true;
+            }
+            let combined = format!(
+                "{} {}",
+                result.title.to_lowercase(),
+                result.content.to_lowercase()
+            );
+            terms.iter().any(|term| combined.contains(term))
+        })
+        .take(max)
+        .map(|result| NewsItem {
+            title: result.title,
+            url: result.url,
+            source: "SearXNG".to_string(),
+            published: result.published,
+            description: result.content.chars().take(300).collect(),
+        })
+        .collect()
 }
 
 pub async fn fetch_radar_signals(kw: &str, max: usize) -> Vec<RadarSignal> {
