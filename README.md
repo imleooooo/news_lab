@@ -54,7 +54,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 cd news-app/news-rs
 cargo build --release
 
-# 3. 設定環境變數後執行
+# 3. 執行（OpenAI 模式需設定 OPENAI_API_KEY）
 OPENAI_API_KEY=sk-... ./target/release/news_lab
 ```
 
@@ -65,7 +65,7 @@ OPENAI_API_KEY=sk-... ./target/release/news_lab
 在 `news-app/news-rs/` 或 `news-app/` 目錄下建立 `.env` 檔：
 
 ```env
-# 必要
+# OpenAI Provider 使用；若啟動時選「自定義 API」則不需要
 OPENAI_API_KEY=sk-...
 
 # 選用（提高 GitHub API 速率上限，CNCF 功能建議設定）
@@ -76,6 +76,12 @@ REVIEW_MODEL=gpt-4o
 ```
 
 `.pkg` 安裝版會自動將 `.env` 打包至 App bundle，無需額外設定。
+
+啟動後可選擇 `OpenAI` 或 `自定義 API`。自定義 API 需相容 OpenAI Chat Completions 格式，並在互動提示中輸入：
+
+- API base URL，例如 `https://example.com/v1`（不要填完整 `/chat/completions` endpoint）
+- API key
+- model name
 
 ---
 

@@ -1,3 +1,4 @@
+use crate::config::{LLMProvider, LLMSettings};
 use anyhow::Result;
 use async_openai::{
     config::OpenAIConfig,
@@ -21,11 +22,15 @@ pub struct LLMClient {
 }
 
 impl LLMClient {
-    pub fn new(model: &str) -> Result<Self> {
-        let client = Client::new();
+    pub fn new(settings: &LLMSettings) -> Result<Self> {
+        let mut openai_config = OpenAIConfig::new().with_api_key(settings.api_key.clone());
+        if let LLMProvider::Custom { base_url } = &settings.provider {
+            openai_config = openai_config.with_api_base(base_url.clone());
+        }
+        let client = Client::with_config(openai_config);
         Ok(Self {
             client,
-            model: model.to_string(),
+            model: settings.model.clone(),
             prompt_tokens: Arc::new(AtomicU64::new(0)),
             completion_tokens: Arc::new(AtomicU64::new(0)),
         })

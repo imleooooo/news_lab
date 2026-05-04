@@ -131,8 +131,9 @@ fn print_banner() {
 
 async fn run_news_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()> {
     let max = cfg.max_results;
+    let llm_cache_key = cfg.llm.cache_key();
 
-    let cache_key = ["news", kw, &cfg.model, &max.to_string()];
+    let cache_key = ["news", kw, &llm_cache_key, &max.to_string()];
     if let Some((cached, ttl)) = cache::get(&cache_key) {
         show_cached(&cached, ttl);
         return Ok(());
@@ -255,12 +256,13 @@ async fn run_github_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
 
     let is_emerging = mode.contains("新興");
     let mode_key = if is_emerging { "emerging" } else { "hot" };
+    let llm_cache_key = cfg.llm.cache_key();
 
     let cache_key = [
         "github",
         kw,
         mode_key,
-        &cfg.model,
+        &llm_cache_key,
         &cfg.max_results.to_string(),
     ];
     if let Some((cached, ttl)) = cache::get(&cache_key) {
@@ -322,7 +324,8 @@ async fn run_github_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
 // ── Run: arXiv Paper Summary ───────────────────────────────────────────────────
 
 async fn run_paper_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()> {
-    let cache_key = ["arxiv", kw, &cfg.model, &cfg.max_results.to_string()];
+    let llm_cache_key = cfg.llm.cache_key();
+    let cache_key = ["arxiv", kw, &llm_cache_key, &cfg.max_results.to_string()];
     if let Some((cached, ttl)) = cache::get(&cache_key) {
         show_cached(&cached, ttl);
         return Ok(());
@@ -376,7 +379,8 @@ async fn run_paper_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()
 // ── Run: Podcast Summary ───────────────────────────────────────────────────────
 
 async fn run_podcast_summary(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<()> {
-    let cache_key = ["podcast", kw, &cfg.model, &cfg.max_results.to_string()];
+    let llm_cache_key = cfg.llm.cache_key();
+    let cache_key = ["podcast", kw, &llm_cache_key, &cfg.max_results.to_string()];
     if let Some((cached, ttl)) = cache::get(&cache_key) {
         show_cached(&cached, ttl);
         return Ok(());
@@ -894,7 +898,16 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
     let fetch_n = cfg.max_results.max(12);
     let review_model =
         std::env::var("REVIEW_MODEL").unwrap_or_else(|_| "gpt-5.4-2026-03-05".to_string());
-    let cache_key = ["radar", kw, &llm.model, &review_model, &fetch_n.to_string()];
+    let review_settings = cfg.llm.with_model(&review_model);
+    let llm_cache_key = cfg.llm.cache_key();
+    let review_cache_key = review_settings.cache_key();
+    let cache_key = [
+        "radar",
+        kw,
+        &llm_cache_key,
+        &review_cache_key,
+        &fetch_n.to_string(),
+    ];
     if let Some((cached, ttl)) =
         cache::get_with_ttl::<RadarCacheEntry>(&cache_key, RADAR_CACHE_TTL_SECS)
     {
@@ -922,8 +935,8 @@ async fn run_terminal_radar(kw: &str, cfg: &Config, llm: &LLMClient) -> Result<(
     }
 
     // Review loop: advanced model audits and augments, up to 2 rounds.
-    // Use REVIEW_MODEL env var if set, otherwise default to gpt-5.4-2026-03-05.
-    let review_llm = LLMClient::new(&review_model)?;
+    // Use REVIEW_MODEL env var if set; keep the same provider/API settings.
+    let review_llm = LLMClient::new(&review_settings)?;
     for round in 1..=2u8 {
         let spinner = Spinner::new(&format!(
             "進階模型審核雷達圖（第 {}/2 輪，{}）...",
@@ -1518,27 +1531,16 @@ async fn main() -> Result<()> {
         })
         .init();
 
-    let api_key_ok = std::env::var("OPENAI_API_KEY")
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false);
-    if !api_key_ok {
-        eprintln!(
-            "\n  {} 請設定 OPENAI_API_KEY 環境變數，或在 {} 加入 OPENAI_API_KEY=sk-...",
-            style("✗").red().bold(),
-            style(".env").cyan(),
-        );
-        std::process::exit(1);
-    }
-
     print_banner();
 
     let mut cfg = configure()?;
-    let llm = LLMClient::new(&cfg.model)?;
+    let llm = LLMClient::new(&cfg.llm)?;
 
     println!(
-        "\n  {} 模型: {} | 最大結果: {}",
+        "\n  {} Provider: {} | 模型: {} | 最大結果: {}",
         style("✓").green(),
-        style(&cfg.model).cyan(),
+        style(cfg.llm.provider_label()).cyan(),
+        style(&cfg.llm.model).cyan(),
         style(cfg.max_results).cyan()
     );
     separator();
