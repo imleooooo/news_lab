@@ -143,13 +143,7 @@ tokens(A) ⊆ tokens(B)  或  tokens(B) ⊆ tokens(A)
 
 **位置：** `main.rs:run_terminal_radar`（loop）→ `radar/mod.rs::review_and_augment`
 
-```rust
-let review_llm = LLMClient::new("gpt-5.4-2026-03-05")?;
-for round in 1..=2u8 {
-    let satisfied = review_and_augment(&mut blips, &q_names, kw, &review_llm).await;
-    if satisfied { break; }
-}
-```
+`review_llm` 會沿用目前 provider（OpenAI 或自定義 API）建立；`REVIEW_MODEL` 只覆蓋模型名稱，不改變 provider。
 
 ### 審核流程
 
@@ -413,6 +407,6 @@ struct Blip {
 | 階段 | 模型 | max_tokens | 用途 |
 |------|------|-----------|------|
 | extract_blips | `cfg.model`（預設 gpt-4o-mini）| 16,384 | 生成完整雷達 JSON |
-| review_and_augment | `gpt-5.4-2026-03-05` | 8,192 | 審核完整性並補充缺漏 |
+| review_and_augment | `REVIEW_MODEL`（未設定時沿用目前 provider 的預設模型） | 8,192 | 審核完整性並補充缺漏 |
 | analyze_competition（JSON）| `cfg.model` | 2,048（預設）| 競品 JSON 陣列 |
 | analyze_competition（text）| `cfg.model` | 4,096 | 選型建議文字 |

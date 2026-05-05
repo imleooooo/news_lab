@@ -13,10 +13,12 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
+use std::time::Duration;
 
 pub struct LLMClient {
     client: Client<OpenAIConfig>,
     pub model: String,
+    provider: LLMProvider,
     prompt_tokens: Arc<AtomicU64>,
     completion_tokens: Arc<AtomicU64>,
 }
@@ -31,6 +33,7 @@ impl LLMClient {
         Ok(Self {
             client,
             model: settings.model.clone(),
+            provider: settings.provider.clone(),
             prompt_tokens: Arc::new(AtomicU64::new(0)),
             completion_tokens: Arc::new(AtomicU64::new(0)),
         })
@@ -50,15 +53,22 @@ impl LLMClient {
 
     /// `max_tokens`: max_completion_tokens to request.
     /// Use a larger value (e.g. 16384) for complex outputs like radar JSON.
-    /// Retries up to 3 times on transient network / API errors (1 s → 2 s backoff).
+    /// Retries on transient network / API errors with configurable timeout.
     pub async fn invoke_with_limit(&self, prompt: &str, max_tokens: u32) -> Result<String> {
+        let timeout_secs = env_u64("LLM_TIMEOUT_SECS", 60);
+        let max_retries = env_u32("LLM_MAX_RETRIES", 3).max(1);
         let mut last_err = anyhow::anyhow!("no attempts");
 
-        for attempt in 0..3u32 {
+        for attempt in 0..max_retries {
             if attempt > 0 {
-                let wait = 1u64 << (attempt - 1); // 1 s, 2 s
-                warn!("[llm] 第 {}/{} 次重試，等待 {}s...", attempt + 1, 3, wait);
-                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                let wait = 1u64 << (attempt - 1); // 1 s, 2 s, 4 s...
+                warn!(
+                    "[llm] 第 {}/{} 次重試，等待 {}s...",
+                    attempt + 1,
+                    max_retries,
+                    wait
+                );
+                tokio::time::sleep(Duration::from_secs(wait)).await;
             }
 
             // Rebuild per iteration: both user_msg and request are consumed by the call.
@@ -81,11 +91,37 @@ impl LLMClient {
                 Err(e) => return Err(e.into()),
             };
 
-            let response = match self.client.chat().create(request).await {
-                Ok(r) => r,
-                Err(e) => {
+            let response = match tokio::time::timeout(
+                Duration::from_secs(timeout_secs),
+                self.client.chat().create(request),
+            )
+            .await
+            {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    // Custom OpenAI-compatible providers may reject this field.
+                    if self.is_custom() && should_fallback_to_max_tokens(&e.to_string()) {
+                        match self.invoke_with_legacy_max_tokens(prompt, max_tokens, timeout_secs).await {
+                            Ok(r) => return Ok(r),
+                            Err(fallback_err) => {
+                                last_err = fallback_err;
+                                continue;
+                            }
+                        }
+                    }
                     last_err = e.into();
                     continue; // network / API error → retry
+                }
+                Err(_) => {
+                    last_err = anyhow::anyhow!(
+                        "LLM 請求逾時（{}s，provider={}，model={}，attempt={}/{})",
+                        timeout_secs,
+                        self.provider_label(),
+                        self.model,
+                        attempt + 1,
+                        max_retries
+                    );
+                    continue;
                 }
             };
 
@@ -128,6 +164,67 @@ impl LLMClient {
         Err(last_err)
     }
 
+    async fn invoke_with_legacy_max_tokens(
+        &self,
+        prompt: &str,
+        max_tokens: u32,
+        timeout_secs: u64,
+    ) -> Result<String> {
+        let user_msg: ChatCompletionRequestMessage = ChatCompletionRequestUserMessageArgs::default()
+            .content(prompt)
+            .build()?
+            .into();
+        let request = CreateChatCompletionRequestArgs::default()
+            .model(&self.model)
+            .messages(vec![user_msg])
+            .max_tokens(max_tokens)
+            .build()?;
+        let response = match tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            self.client.chat().create(request),
+        )
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                anyhow::bail!(
+                    "LLM 請求逾時（legacy max_tokens，{}s，provider={}，model={}）",
+                    timeout_secs,
+                    self.provider_label(),
+                    self.model
+                )
+            }
+        };
+
+        let usage = response.usage;
+        let choices = response.choices;
+        if let Some(ref u) = usage {
+            self.prompt_tokens
+                .fetch_add(u.prompt_tokens as u64, Ordering::Relaxed);
+            self.completion_tokens
+                .fetch_add(u.completion_tokens as u64, Ordering::Relaxed);
+        }
+        let Some(choice) = choices.into_iter().next() else {
+            anyhow::bail!("API 回傳 0 個 choices");
+        };
+        match choice.message.content {
+            Some(text) if !text.trim().is_empty() => Ok(text),
+            _ => anyhow::bail!("LLM 回傳空內容（legacy max_tokens）"),
+        }
+    }
+
+    fn is_custom(&self) -> bool {
+        matches!(self.provider, LLMProvider::Custom { .. })
+    }
+
+    fn provider_label(&self) -> &'static str {
+        match self.provider {
+            LLMProvider::OpenAI => "openai",
+            LLMProvider::Custom { .. } => "custom",
+        }
+    }
+
     /// Default limit for summaries (4096 tokens is enough for short outputs).
     pub async fn invoke(&self, prompt: &str) -> Result<String> {
         self.invoke_with_limit(prompt, 4096).await
@@ -150,4 +247,55 @@ pub fn model_cost(model: &str, prompt: u64, completion: u64) -> f64 {
         (2.50, 10.0) // default to gpt-4o pricing
     };
     (prompt as f64 * price_in + completion as f64 * price_out) / 1_000_000.0
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
+
+fn env_u32(name: &str, default: u32) -> u32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
+
+fn should_fallback_to_max_tokens(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    (e.contains("max_completion_tokens") || e.contains("max completion tokens"))
+        && (e.contains("unknown") || e.contains("invalid") || e.contains("unsupported"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{env_u32, env_u64, should_fallback_to_max_tokens};
+
+    #[test]
+    fn fallback_detection_works() {
+        assert!(should_fallback_to_max_tokens(
+            "unknown field `max_completion_tokens` in request"
+        ));
+        assert!(should_fallback_to_max_tokens(
+            "invalid parameter: max completion tokens unsupported"
+        ));
+        assert!(!should_fallback_to_max_tokens("rate limit exceeded"));
+    }
+
+    #[test]
+    fn env_parsing_defaults_on_invalid_values() {
+        unsafe { std::env::set_var("LLM_TIMEOUT_SECS", "45"); }
+        unsafe { std::env::set_var("LLM_MAX_RETRIES", "2"); }
+        assert_eq!(env_u64("LLM_TIMEOUT_SECS", 60), 45);
+        assert_eq!(env_u32("LLM_MAX_RETRIES", 3), 2);
+
+        unsafe { std::env::set_var("LLM_TIMEOUT_SECS", "0"); }
+        unsafe { std::env::set_var("LLM_MAX_RETRIES", "bad"); }
+        assert_eq!(env_u64("LLM_TIMEOUT_SECS", 60), 60);
+        assert_eq!(env_u32("LLM_MAX_RETRIES", 3), 3);
+    }
 }

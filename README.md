@@ -9,7 +9,7 @@
   ╚═╝  ╚═══╝╚══════╝ ╚══╝╚══╝ ╚══════╝      ╚══════╝╚═╝  ╚═╝╚═════╝
 ```
 
-科技新聞摘要 + 技術雷達的終端機 CLI，以 Rust 撰寫，透過 OpenAI API 對各大技術來源進行 AI 摘要與分析。
+科技新聞摘要 + 技術雷達的終端機 CLI，以 Rust 撰寫，支援 OpenAI 與 OpenAI-compatible 自定義 API，對各大技術來源進行 AI 摘要與分析。
 
 ---
 
@@ -32,7 +32,7 @@
 ## 系統需求
 
 - macOS 12 Monterey 以上（Apple Silicon 或 Intel）
-- **OpenAI API 金鑰**（必要）
+- OpenAI API 金鑰（僅 OpenAI 模式需要）
 - GitHub Personal Access Token（選用，避免 API 限速）
 
 ---
@@ -66,7 +66,7 @@ OPENAI_API_KEY=sk-... ./target/release/news_lab
 在 `news-app/news-rs/` 或 `news-app/` 目錄下建立 `.env` 檔：
 
 ```env
-# OpenAI Provider 使用；若啟動時選「自定義 API」則不需要
+# 僅 OpenAI Provider 使用；若啟動時選「自定義 API」則不需要
 OPENAI_API_KEY=sk-...
 
 # 選用（提高 GitHub API 速率上限，CNCF 功能建議設定）
@@ -75,13 +75,17 @@ GITHUB_TOKEN=ghp_...
 # 選用（SearXNG metasearch；設定後新聞補充來源與企業案例搜尋會使用）
 SEARXNG_URL=http://127.0.0.1:8888
 
-# 選用（技術雷達「進階審核」使用的模型，預設 gpt-5.4-2026-03-05）
+# 選用（技術雷達「進階審核」使用的模型；僅覆蓋 model，不改 provider）
 REVIEW_MODEL=gpt-4o
+
+# 選用（LLM 呼叫逾時秒數與最大重試次數）
+LLM_TIMEOUT_SECS=60
+LLM_MAX_RETRIES=3
 ```
 
 `.pkg` 安裝版會自動將 `.env` 打包至 App bundle，無需額外設定。
 
-啟動後可選擇 `OpenAI` 或 `自定義 API`。自定義 API 需相容 OpenAI Chat Completions 格式，並在互動提示中輸入：
+啟動後可選擇 `OpenAI` 或 `自定義 API`。選擇 `自定義 API` 後，所有 LLM 功能都只會使用你的自定義端點，不會呼叫 OpenAI API。自定義 API 需相容 OpenAI Chat Completions 格式，並在互動提示中輸入：
 
 - API base URL，例如 `https://example.com/v1`（不要填完整 `/chat/completions` endpoint）
 - API key

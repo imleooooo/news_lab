@@ -15,13 +15,6 @@ pub struct LLMSettings {
 }
 
 impl LLMSettings {
-    pub fn provider_label(&self) -> &'static str {
-        match self.provider {
-            LLMProvider::OpenAI => "OpenAI",
-            LLMProvider::Custom { .. } => "自定義 API",
-        }
-    }
-
     pub fn cache_key(&self) -> String {
         match &self.provider {
             LLMProvider::OpenAI => format!("openai:{}", self.model),
@@ -29,10 +22,13 @@ impl LLMSettings {
         }
     }
 
-    pub fn with_model(&self, model: &str) -> Self {
+    pub fn with_model(&self, model: &str) -> anyhow::Result<Self> {
+        if model.trim().is_empty() {
+            anyhow::bail!("Model name 不可為空");
+        }
         let mut settings = self.clone();
         settings.model = model.to_string();
-        settings
+        Ok(settings)
     }
 }
 

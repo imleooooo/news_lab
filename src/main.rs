@@ -909,12 +909,11 @@ async fn run_terminal_radar(
 ) -> Result<()> {
     let fetch_n = cfg.max_results.max(12);
     let default_review_model = match &cfg.llm.provider {
-        LLMProvider::OpenAI => "gpt-5.4-2026-03-05",
-        LLMProvider::Custom { .. } => &cfg.llm.model,
+        LLMProvider::OpenAI => "gpt-5.4-2026-03-05".to_string(),
+        LLMProvider::Custom { .. } => cfg.llm.model.clone(),
     };
-    let review_model =
-        std::env::var("REVIEW_MODEL").unwrap_or_else(|_| default_review_model.to_string());
-    let review_settings = cfg.llm.with_model(&review_model);
+    let review_model = std::env::var("REVIEW_MODEL").unwrap_or(default_review_model);
+    let review_settings = cfg.llm.with_model(&review_model)?;
     let llm_cache_key = cfg.llm.cache_key();
     let review_cache_key = review_settings.cache_key();
     let cache_key = [
@@ -1589,10 +1588,14 @@ async fn main() -> Result<()> {
     let mut cfg = configure()?;
     let llm = LLMClient::new(&cfg.llm)?;
 
+    let provider_info = match &cfg.llm.provider {
+        LLMProvider::OpenAI => "openai".to_string(),
+        LLMProvider::Custom { base_url } => format!("custom ({})", base_url),
+    };
     println!(
         "\n  {} Provider: {} | 模型: {} | 最大結果: {}",
         style("✓").green(),
-        style(cfg.llm.provider_label()).cyan(),
+        style(provider_info).cyan(),
         style(&cfg.llm.model).cyan(),
         style(cfg.max_results).cyan()
     );
