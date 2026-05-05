@@ -1,8 +1,21 @@
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
+use std::error::Error;
+use std::fmt;
 
 pub const SEARXNG_DISABLED: &str = "SEARXNG_DISABLED";
+
+#[derive(Debug)]
+struct SearxngDisabledError;
+
+impl fmt::Display for SearxngDisabledError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(SEARXNG_DISABLED)
+    }
+}
+
+impl Error for SearxngDisabledError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchResult {
@@ -49,12 +62,12 @@ pub fn searxng_search_url(base_url: &str, query: &str) -> String {
 }
 
 pub fn is_searxng_disabled_error(err: &anyhow::Error) -> bool {
-    err.to_string() == SEARXNG_DISABLED
+    err.downcast_ref::<SearxngDisabledError>().is_some() || err.to_string() == SEARXNG_DISABLED
 }
 
 pub async fn search_searxng(query: &str, client: &reqwest::Client) -> Result<Vec<SearchResult>> {
     let Some(base_url) = searxng_base_url() else {
-        return Err(anyhow!(SEARXNG_DISABLED));
+        return Err(anyhow!(SearxngDisabledError));
     };
     search_searxng_with_base_url(query, client, &base_url).await
 }
@@ -66,7 +79,7 @@ pub async fn search_searxng_with_base_url(
 ) -> Result<Vec<SearchResult>> {
     let base_url = base_url.trim().trim_end_matches('/').to_string();
     if base_url.is_empty() {
-        return Err(anyhow!(SEARXNG_DISABLED));
+        return Err(anyhow!(SearxngDisabledError));
     }
 
     let url = searxng_search_url(&base_url, query);

@@ -15,6 +15,9 @@ use std::sync::{
 };
 use std::time::Duration;
 
+const MAX_BACKOFF_SHIFT: u32 = 6; // 64s
+const MAX_BACKOFF_SECS: u64 = 64;
+
 pub struct LLMClient {
     client: Client<OpenAIConfig>,
     pub model: String,
@@ -61,7 +64,8 @@ impl LLMClient {
 
         for attempt in 0..max_retries {
             if attempt > 0 {
-                let wait = 1u64 << (attempt - 1); // 1 s, 2 s, 4 s...
+                let shift = (attempt - 1).min(MAX_BACKOFF_SHIFT);
+                let wait = (1u64 << shift).min(MAX_BACKOFF_SECS); // 1..64s (capped)
                 warn!(
                     "[llm] 第 {}/{} 次重試，等待 {}s...",
                     attempt + 1,

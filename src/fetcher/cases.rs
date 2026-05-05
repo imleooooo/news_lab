@@ -1,6 +1,6 @@
 use crate::cache;
 use crate::fetcher::docs::fetch_doc_page;
-use crate::fetcher::search::{is_searxng_disabled_error, search_searxng};
+use crate::fetcher::search::{is_searxng_disabled_error, searxng_base_url, search_searxng};
 use crate::llm::LLMClient;
 use crate::radar::Blip;
 use anyhow::{anyhow, Result};
@@ -49,6 +49,7 @@ pub struct BlipCaseBundle {
 struct PageCollection {
     pages: String,
     fetched_pages: usize,
+    search_degraded: bool,
 }
 
 struct OfficialHostDiscovery {
@@ -104,11 +105,17 @@ pub async fn fetch_enterprise_cases(
     max_cases: usize,
     policy: SourcePolicy,
 ) -> Result<BlipCaseBundle> {
+    let searxng_enabled = searxng_base_url().is_some();
     let cache_key = [
         CASE_CACHE_PREFIX,
         blip.name.as_str(),
         blip.github_repo.as_str(),
         policy.as_str(),
+        if searxng_enabled {
+            "searxng:on"
+        } else {
+            "searxng:off"
+        },
         &max_cases.to_string(),
     ];
     if let Some((items, _ttl)) = cache::get(&cache_key) {
@@ -135,7 +142,10 @@ pub async fn fetch_enterprise_cases(
     let page_collection = collect_case_pages(blip, &host_discovery.hosts, &client).await?;
     if page_collection.pages.is_empty() {
         let empty = empty_bundle(blip, policy);
-        if page_collection.fetched_pages > 0 && !host_discovery.search_degraded {
+        if page_collection.fetched_pages > 0
+            && !host_discovery.search_degraded
+            && !page_collection.search_degraded
+        {
             put_bundle_cache(&cache_key, &empty);
         }
         return Ok(empty);
@@ -168,7 +178,7 @@ pub async fn fetch_enterprise_cases(
         fetched_at: Utc::now().format("%Y-%m-%d").to_string(),
         source_policy: policy.as_str().to_string(),
     };
-    if !host_discovery.search_degraded {
+    if !host_discovery.search_degraded && !page_collection.search_degraded {
         put_bundle_cache(&cache_key, &bundle);
     }
     Ok(bundle)
@@ -261,6 +271,7 @@ async fn collect_case_pages(
     let mut seen_urls = HashSet::new();
     let mut fetched_pages = 0usize;
     let mut total_candidate_urls = 0usize;
+    let mut search_degraded = false;
 
     for host in hosts.iter().take(3) {
         let mut host_candidate_urls = 0usize;
@@ -280,7 +291,15 @@ async fn collect_case_pages(
         }
 
         for query in case_search_queries(host, &blip.name) {
-            for result in search_searxng(&query, client).await?.into_iter().take(4) {
+            let search_results = match search_searxng(&query, client).await {
+                Ok(results) => results,
+                Err(err) if is_searxng_disabled_error(&err) => {
+                    search_degraded = true;
+                    break;
+                }
+                Err(err) => return Err(err),
+            };
+            for result in search_results.into_iter().take(4) {
                 if !host_matches(&result.url, host) || !seen_urls.insert(result.url.clone()) {
                     continue;
                 }
@@ -323,6 +342,7 @@ async fn collect_case_pages(
     Ok(PageCollection {
         pages: sections.join("\n\n---\n\n"),
         fetched_pages,
+        search_degraded,
     })
 }
 
