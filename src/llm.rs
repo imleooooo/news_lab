@@ -58,7 +58,7 @@ impl LLMClient {
     /// Use a larger value (e.g. 16384) for complex outputs like radar JSON.
     /// Retries on transient network / API errors with configurable timeout.
     pub async fn invoke_with_limit(&self, prompt: &str, max_tokens: u32) -> Result<String> {
-        let timeout_secs = env_u64("LLM_TIMEOUT_SECS", 600);
+        let timeout_secs = env_u64("LLM_TIMEOUT_SECS", 3600);
         let max_retries = env_u32("LLM_MAX_RETRIES", 3).max(1);
         let mut last_err = anyhow::anyhow!("no attempts");
 
