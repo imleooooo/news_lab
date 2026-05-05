@@ -832,9 +832,7 @@ const METHOD_REVIEW_PROMPT: &str = r#"你是一位技術方法論審核專家。
 
 #[derive(Deserialize)]
 struct ReviewResponse {
-    #[serde(default)]
     satisfied: bool,
-    #[serde(default)]
     reason: String,
     #[serde(default)]
     blips: Vec<Blip>,
