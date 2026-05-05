@@ -25,7 +25,7 @@ use fetcher::{
     },
 };
 use inquire::{validator::Validation, Select, Text};
-use llm::LLMClient;
+use llm::{set_debug_mode, LLMClient};
 use radar::{
     check_oss_activity, extract_blips, review_and_augment, terminal as radar_terminal, RadarMode,
     ReviewOutcome,
@@ -1587,6 +1587,8 @@ async fn main() -> Result<()> {
 
     let mut cfg = configure()?;
     let llm = LLMClient::new(&cfg.llm)?;
+    let mut debug_mode = false;
+    set_debug_mode(debug_mode);
 
     let provider_info = match &cfg.llm.provider {
         LLMProvider::OpenAI => "openai".to_string(),
@@ -1640,6 +1642,7 @@ async fn main() -> Result<()> {
                 "專案雷達和競品分析 (開源/閉源軟體)".to_string(),
                 "方法雷達 (方法論/演算法)".to_string(),
                 "其他功能 ▶".to_string(),
+                format!("Debug Mode: {}", if debug_mode { "ON" } else { "OFF" }),
                 format!("調整筆數 (目前: {})", cfg.max_results),
                 "清空快取".to_string(),
                 "更換關鍵字".to_string(),
@@ -1669,6 +1672,17 @@ async fn main() -> Result<()> {
                     run_terminal_radar(&keyword, &cfg, &llm, RadarMode::Method).await
                 }
                 f if f.contains("其他功能") => run_extras(&cfg, &llm).await,
+                f if f.contains("Debug Mode") => {
+                    debug_mode = !debug_mode;
+                    set_debug_mode(debug_mode);
+                    println!(
+                        "  {} Debug Mode 已{}",
+                        style("✓").green(),
+                        if debug_mode { "開啟" } else { "關閉" }
+                    );
+                    separator();
+                    continue 'feat;
+                }
                 f if f.contains("調整筆數") => {
                     let cur = cfg.max_results.to_string();
                     let input = Text::new("每次最多抓取幾筆資料:")

@@ -1,7 +1,7 @@
 pub mod cases;
 pub mod terminal;
 
-use crate::llm::LLMClient;
+use crate::llm::{debug_mode_enabled, LLMClient};
 use anyhow::Result;
 use chrono::Utc;
 use log::{debug, info, warn};
@@ -702,16 +702,33 @@ pub async fn extract_blips(
         .replace("{keyword}", kw)
         .replace("{n_signals}", &items.len().min(10).to_string())
         .replace("{signal_list}", &signal_list);
+    info!(
+        "[radar] extract_blips 開始: mode={}, signals={}, prompt_chars={}",
+        mode.cache_key(),
+        items.len().min(10),
+        prompt.chars().count()
+    );
 
     // Radar JSON can be large (15-40 blips); use higher token limit
     let response = llm.invoke_with_limit(&prompt, 16384).await?;
+    info!(
+        "[radar] extract_blips 收到回應: response_chars={}",
+        response.chars().count()
+    );
     let json_str = sanitize_json_strings(extract_json(&response));
+    info!(
+        "[radar] extract_blips 抽取 JSON: json_chars={}",
+        json_str.chars().count()
+    );
 
     let parsed: RadarResponse = match serde_json::from_str(&json_str) {
         Ok(r) => r,
         Err(e) => {
             warn!("[radar] JSON 解析失敗: {e}");
             debug!("[radar] LLM 原始回應:\n{response}");
+            if debug_mode_enabled() {
+                info!("[radar] 回應片段: {}", snippet_edges(&response, 200));
+            }
             return Ok((default_quadrant_names(mode), vec![]));
         }
     };
@@ -726,6 +743,7 @@ pub async fn extract_blips(
     let mut blips: Vec<Blip> = parsed.blips.into_iter().map(normalize_blip).collect();
 
     blips = filter_blips_for_mode(deduplicate(blips), mode);
+    info!("[radar] extract_blips 完成: blips={}", blips.len());
 
     Ok((q_names, blips))
 }
@@ -903,12 +921,20 @@ pub async fn review_and_augment(
             };
         }
     };
+    info!(
+        "[review] 收到回應: response_chars={}, round_input_blips={}",
+        response.chars().count(),
+        blips.len()
+    );
 
     let json_str = sanitize_json_strings(extract_json(&response));
     let parsed: ReviewResponse = match serde_json::from_str(&json_str) {
         Ok(r) => r,
         Err(e) => {
             warn!("[review] JSON 解析失敗: {e}");
+            if debug_mode_enabled() {
+                info!("[review] 回應片段: {}", snippet_edges(&response, 200));
+            }
             return ReviewOutcome::Skipped {
                 reason: format!("JSON 解析失敗: {e}"),
             };
@@ -929,6 +955,16 @@ pub async fn review_and_augment(
     *blips = filter_blips_for_mode(deduplicate(std::mem::take(blips)), mode);
 
     ReviewOutcome::Augmented
+}
+
+fn snippet_edges(s: &str, edge_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= edge_chars.saturating_mul(2) + 8 {
+        return s.to_string();
+    }
+    let head: String = chars[..edge_chars].iter().collect();
+    let tail: String = chars[chars.len() - edge_chars..].iter().collect();
+    format!("{head} ... [snip] ... {tail}")
 }
 
 #[cfg(test)]

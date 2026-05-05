@@ -10,13 +10,31 @@ use async_openai::{
 };
 use log::warn;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::time::Duration;
+use tokio::time::Instant;
 
 const MAX_BACKOFF_SHIFT: u32 = 6; // 64s
 const MAX_BACKOFF_SECS: u64 = 64;
+const DEFAULT_PROGRESS_INTERVAL_SECS: u64 = 10;
+
+static DEBUG_MODE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_debug_mode(enabled: bool) {
+    DEBUG_MODE.store(enabled, Ordering::Relaxed);
+}
+
+pub fn debug_mode_enabled() -> bool {
+    DEBUG_MODE.load(Ordering::Relaxed)
+}
+
+fn debug_progress(msg: &str) {
+    if debug_mode_enabled() {
+        println!("  [debug] {msg}");
+    }
+}
 
 pub struct LLMClient {
     client: Client<OpenAIConfig>,
@@ -60,6 +78,8 @@ impl LLMClient {
     pub async fn invoke_with_limit(&self, prompt: &str, max_tokens: u32) -> Result<String> {
         let timeout_secs = env_u64("LLM_TIMEOUT_SECS", 3600);
         let max_retries = env_u32("LLM_MAX_RETRIES", 3).max(1);
+        let progress_interval_secs =
+            env_u64("LLM_PROGRESS_INTERVAL_SECS", DEFAULT_PROGRESS_INTERVAL_SECS);
         let mut last_err = anyhow::anyhow!("no attempts");
 
         for attempt in 0..max_retries {
@@ -74,6 +94,16 @@ impl LLMClient {
                 );
                 tokio::time::sleep(Duration::from_secs(wait)).await;
             }
+            debug_progress(&format!(
+                "LLM attempt {}/{} 開始 (provider={}, model={}, prompt_chars={}, max_tokens={}, timeout={}s)",
+                attempt + 1,
+                max_retries,
+                self.provider_label(),
+                self.model,
+                prompt.chars().count(),
+                max_tokens,
+                timeout_secs
+            ));
 
             // Rebuild per iteration: both user_msg and request are consumed by the call.
             let user_msg: ChatCompletionRequestMessage =
@@ -95,16 +125,43 @@ impl LLMClient {
                 Err(e) => return Err(e.into()),
             };
 
-            let response = match tokio::time::timeout(
-                Duration::from_secs(timeout_secs),
-                self.client.chat().create(request),
-            )
-            .await
-            {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
+            let chat = self.client.chat();
+            let response_fut = chat.create(request);
+            tokio::pin!(response_fut);
+            let call_started = Instant::now();
+            let response = loop {
+                let elapsed = call_started.elapsed().as_secs();
+                if elapsed >= timeout_secs {
+                    break Err(anyhow::anyhow!(
+                        "LLM 請求逾時（{}s，provider={}，model={}，attempt={}/{})",
+                        timeout_secs,
+                        self.provider_label(),
+                        self.model,
+                        attempt + 1,
+                        max_retries
+                    ));
+                }
+                let remaining = timeout_secs - elapsed;
+                let step = remaining.min(progress_interval_secs).max(1);
+                match tokio::time::timeout(Duration::from_secs(step), &mut response_fut).await {
+                    Ok(Ok(resp)) => break Ok(resp),
+                    Ok(Err(e)) => break Err(e.into()),
+                    Err(_) => {
+                        debug_progress(&format!(
+                            "LLM 等待中... 已等待 {}s (attempt {}/{})",
+                            call_started.elapsed().as_secs(),
+                            attempt + 1,
+                            max_retries
+                        ));
+                    }
+                }
+            };
+            let response = match response {
+                Ok(r) => r,
+                Err(e) => {
                     // Custom OpenAI-compatible providers may reject this field.
                     if self.is_custom() && should_fallback_to_max_tokens(&e.to_string()) {
+                        debug_progress("偵測到 max_completion_tokens 不相容，改用 legacy max_tokens 重試");
                         match self.invoke_with_legacy_max_tokens(prompt, max_tokens, timeout_secs).await {
                             Ok(r) => return Ok(r),
                             Err(fallback_err) => {
@@ -113,19 +170,8 @@ impl LLMClient {
                             }
                         }
                     }
-                    last_err = e.into();
+                    last_err = e;
                     continue; // network / API error → retry
-                }
-                Err(_) => {
-                    last_err = anyhow::anyhow!(
-                        "LLM 請求逾時（{}s，provider={}，model={}，attempt={}/{})",
-                        timeout_secs,
-                        self.provider_label(),
-                        self.model,
-                        attempt + 1,
-                        max_retries
-                    );
-                    continue;
                 }
             };
 
@@ -156,7 +202,16 @@ impl LLMClient {
             }
 
             match choice.message.content {
-                Some(text) if !text.trim().is_empty() => return Ok(text),
+                Some(text) if !text.trim().is_empty() => {
+                    debug_progress(&format!(
+                        "LLM attempt {}/{} 成功 (elapsed={}s, response_chars={})",
+                        attempt + 1,
+                        max_retries,
+                        call_started.elapsed().as_secs(),
+                        text.chars().count()
+                    ));
+                    return Ok(text);
+                }
                 _ => {
                     warn!("[llm] content 為空，finish_reason={:?}", reason);
                     last_err = anyhow::anyhow!("LLM 回傳空內容（finish_reason={:?}）", reason);
@@ -174,6 +229,8 @@ impl LLMClient {
         max_tokens: u32,
         timeout_secs: u64,
     ) -> Result<String> {
+        let progress_interval_secs =
+            env_u64("LLM_PROGRESS_INTERVAL_SECS", DEFAULT_PROGRESS_INTERVAL_SECS);
         let user_msg: ChatCompletionRequestMessage = ChatCompletionRequestUserMessageArgs::default()
             .content(prompt)
             .build()?
@@ -183,21 +240,29 @@ impl LLMClient {
             .messages(vec![user_msg])
             .max_tokens(max_tokens)
             .build()?;
-        let response = match tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            self.client.chat().create(request),
-        )
-        .await
-        {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => return Err(e.into()),
-            Err(_) => {
+        let chat = self.client.chat();
+        let response_fut = chat.create(request);
+        tokio::pin!(response_fut);
+        let call_started = Instant::now();
+        let response = loop {
+            let elapsed = call_started.elapsed().as_secs();
+            if elapsed >= timeout_secs {
                 anyhow::bail!(
                     "LLM 請求逾時（legacy max_tokens，{}s，provider={}，model={}）",
                     timeout_secs,
                     self.provider_label(),
                     self.model
-                )
+                );
+            }
+            let remaining = timeout_secs - elapsed;
+            let step = remaining.min(progress_interval_secs).max(1);
+            match tokio::time::timeout(Duration::from_secs(step), &mut response_fut).await {
+                Ok(Ok(resp)) => break resp,
+                Ok(Err(e)) => return Err(e.into()),
+                Err(_) => debug_progress(&format!(
+                    "LLM (legacy max_tokens) 等待中... 已等待 {}s",
+                    call_started.elapsed().as_secs()
+                )),
             }
         };
 
